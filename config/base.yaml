@@ -1,0 +1,19 @@
+# 프레임 셀렉션 함수 설정, 함수를 정의한 다음 옵션을 여기서 자유롭게 정의 가능, 
+# 필수인자로 video_path를 받도록 구현해야 함
+frame_selection: 
+  _target_: model.base.uniform_sampling
+  _partial_: true
+  num_frames: 8
+  max_side: 720
+
+vlm:
+  _target_: model.base.BaseVLM
+  model_id: "LanguageBind/Video-LLaVA-7B-hf"
+  backend: "video_llava" # VLM마다 상속하는 인터페이스가 달라서 달라 미리 정의해둔 인터페이스 집합. 자세한 코드는 vlm.py를 참고
+  dtype: "bf16" # Enum[ bf16 | fp16 | fp32 ]
+  frame_selector: ${frame_selection}
+  processor_kwargs: {} # 전처리기 로드시 .from_pretrained() 옵션 설정
+  model_kwargs: {}  # 모델 로드시 .from_pretrained() 옵션 설정
+  generation_kwargs: # 생성시점 옵션, 출력 샘플링 / 온도 설정 / top_p등 설정 가능
+    max_new_tokens: 256
+    do_sample: false
