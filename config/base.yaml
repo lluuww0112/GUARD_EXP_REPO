@@ -17,3 +17,9 @@ vlm:
   generation_kwargs: # 생성시점 옵션, 출력 샘플링 / 온도 설정 / top_p등 설정 가능
     max_new_tokens: 256
     do_sample: false
+
+invoke: 
+  video_path: null
+  prompt_file: "model/prompt.txt"
+  query_file: "model/query.txt"
+  print_config: false # 현재 yaml 파일 내용 출력 여부

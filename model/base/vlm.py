@@ -4,11 +4,13 @@ from typing import Any
 
 import torch
 from transformers import (
-    AutoModelForVision2Seq,
+    AutoModelForImageTextToText,
     AutoProcessor,
     GenerationMixin,
     PreTrainedModel,
     ProcessorMixin,
+    Qwen2VLForConditionalGeneration,
+    Qwen2VLProcessor,
     VideoLlavaForConditionalGeneration,
     VideoLlavaProcessor,
 )
@@ -18,9 +20,9 @@ FrameSelector = Callable[..., torch.Tensor]
 
 
 DTYPE_MAP = {
+    "bf16": torch.bfloat16,
     "fp16": torch.float16,
     "fp32": torch.float32,
-    "bf16": torch.bfloat16,
 }
 
 
@@ -30,12 +32,12 @@ VLM_BACKENDS = {
         "model_cls": VideoLlavaForConditionalGeneration,
     },
     "qwen2_vl": {
-        "processor_cls": AutoProcessor,
-        "model_cls": AutoModelForVision2Seq,
+        "processor_cls": Qwen2VLProcessor,
+        "model_cls": Qwen2VLForConditionalGeneration,
     },
     "auto": {
         "processor_cls": AutoProcessor,
-        "model_cls": AutoModelForVision2Seq,
+        "model_cls": AutoModelForImageTextToText,
     },
 }
 
@@ -83,7 +85,7 @@ class BaseVLM(VLMInterface):
         self.processor_kwargs = processor_kwargs or {}
         self.model_kwargs = model_kwargs or {}
         self.generation_kwargs = dict(generation_kwargs or {})
-        self.dtype = DTYPE_MAP[dtype]
+        self.dtype = DTYPE_MAP[dtype] if isinstance(dtype, str) else dtype
 
         self.processor: ProcessorMixin
         self.model: PreTrainedModel | GenerationMixin
