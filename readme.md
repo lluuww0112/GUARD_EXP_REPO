@@ -140,4 +140,3 @@ GUARD는 이러한 한계를 줄이기 위해, 영상 프레임과 자연어 프
 7. D. Kiela et al., "The Hateful Memes Challenge: Detecting Hate Speech in Multimodal Memes," NeurIPS, 2020.
 8. YouTube, "Set your channel or video's audience," 2023.
 9. YouTube Kids, "Important information for parents," 2023.
-

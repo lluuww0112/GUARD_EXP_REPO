@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 import sys
 import time
+import warnings
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
@@ -68,6 +71,46 @@ def build_vlm(config: DictConfig) -> VLMInterface:
     return vlm
 
 
+@contextmanager
+def suppress_model_loading_output(enabled: bool) -> Iterator[None]:
+    if not enabled:
+        yield
+        return
+
+    from huggingface_hub.utils import (
+        are_progress_bars_disabled,
+        disable_progress_bars,
+        enable_progress_bars,
+    )
+
+    logger_names = (
+        "httpx",
+        "httpcore",
+        "huggingface_hub",
+        "huggingface_hub.utils._http",
+        "transformers",
+    )
+    previous_levels = {
+        name: logging.getLogger(name).level
+        for name in logger_names
+    }
+    progress_bars_were_disabled = are_progress_bars_disabled()
+
+    disable_progress_bars()
+    for name in logger_names:
+        logging.getLogger(name).setLevel(logging.ERROR)
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            yield
+    finally:
+        for name, level in previous_levels.items():
+            logging.getLogger(name).setLevel(level)
+        if not progress_bars_were_disabled:
+            enable_progress_bars()
+
+
 def summarize_config(config: DictConfig) -> dict[str, Any]:
     frame_selection = OmegaConf.to_container(config.frame_selection, resolve=True)
     generation_kwargs = OmegaConf.to_container(
@@ -101,7 +144,10 @@ def main(config: DictConfig) -> None:
         raise FileNotFoundError(f"Video file not found: {video_path}")
 
     prompt = load_prompt(invoke_config)
-    vlm = build_vlm(config)
+    with suppress_model_loading_output(
+        enabled=invoke_config.get("quiet_model_loading", True),
+    ):
+        vlm = build_vlm(config)
 
     if invoke_config.get("print_config", False):
         print("=== Resolved Config ===")

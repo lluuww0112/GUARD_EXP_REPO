@@ -38,3 +38,4 @@ tqdm==4.67.3
 transformers==5.4.0
 typer==0.24.1
 typing_extensions==4.15.0
+yt-dlp==2026.03.17

@@ -19,7 +19,8 @@ vlm:
     do_sample: false
 
 invoke: 
-  video_path: null
+  video_path: "./data/fcN5HGqVzC0.mp4"
   prompt_file: "model/prompt.txt"
   query_file: "model/query.txt"
   print_config: false # 현재 yaml 파일 내용 출력 여부
+  quiet_model_loading: true # Hugging Face/transformers 모델 로딩 로그 및 progress bar 숨김

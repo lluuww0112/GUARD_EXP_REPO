@@ -80,6 +80,7 @@ class BaseVLM(VLMInterface):
 
         self.frame_selector = frame_selector
         self.frame_selector_kwargs = frame_selector_kwargs
+        self.backend = backend
         self.processor_cls = backend_config["processor_cls"]
         self.model_cls = backend_config["model_cls"]
         self.processor_kwargs = processor_kwargs or {}
@@ -114,7 +115,23 @@ class BaseVLM(VLMInterface):
 
         model.eval()
         return processor, model
-    
+
+    def _prepare_prompt(self, prompt: str, has_video: bool) -> str:
+        prompt = prompt.strip()
+        if not has_video:
+            return prompt
+
+        video_token = getattr(self.processor, "video_token", None)
+        if isinstance(video_token, str) and video_token and video_token not in prompt:
+            prompt = f"{video_token}\n{prompt}"
+
+        if self.backend == "video_llava":
+            if not prompt.startswith("USER:"):
+                prompt = f"USER: {prompt}"
+            if "ASSISTANT:" not in prompt:
+                prompt = f"{prompt}\nASSISTANT:"
+
+        return prompt
 
     def answer(
         self,
@@ -127,6 +144,7 @@ class BaseVLM(VLMInterface):
             **frame_selector_kwargs,
         }
         video_tensor = self.frame_selector(video_path=video_path, **selector_kwargs)
+        prompt = self._prepare_prompt(prompt, has_video=video_tensor is not None)
 
         inputs = self.processor(
             text=prompt,
@@ -146,8 +164,14 @@ class BaseVLM(VLMInterface):
                 **self.generation_kwargs,
             )
 
-        return self.processor.batch_decode(
+        input_ids = inputs.get("input_ids")
+        if input_ids is not None:
+            output_ids = output_ids[:, input_ids.shape[1]:]
+
+        response = self.processor.batch_decode(
             output_ids,
             skip_special_tokens=True,
             clean_up_tokenization_spaces=True,
-        )[0]
+        )[0].strip()
+
+        return response
