@@ -1,0 +1,44 @@
+frame_selection:
+  _target_: model.KTV.remove_duplicate_frames
+  _partial_: true
+  num_keyframes: 30
+  max_side: 720
+  frame_stride: 25 # 초기 프레임을 선택하는 간격, 1로 설정시 모든 프레임을 선택
+  model_id: "facebook/dinov2-base"
+  batch_size: 128 # dino 임베딩하는 배치 사이즈
+  device: null
+  random_state: 0
+  num_threads: 10 # null이면 라이브러리 기본값 사용, 예: 8
+  local_files_only: false
+
+token_selection:
+  _target_: model.KTV.key_patch_selection
+  _partial_: true
+  has_cls_token: true
+  keep_cls_token: true
+  alpha: 0.8
+  beta: 0.25
+  min_tokens: 1
+  preserve_spatial_order: true
+
+vlm:
+  _target_: model.base.BaseVLM
+  model_id: "LanguageBind/Video-LLaVA-7B-hf"
+  backend: "video_llava"
+  dtype: "bf16"
+  frame_selector: ${frame_selection}
+  token_selector: ${token_selection}
+  processor_kwargs: {}
+  model_kwargs: {}
+  token_selector_kwargs: {}
+  fallback_to_standard_path: true
+  generation_kwargs:
+    max_new_tokens: 256
+    do_sample: false
+
+invoke:
+  video_path: "./data/fcN5HGqVzC0.mp4"
+  prompt_file: "model/base/prompt.txt"
+  query_file: "model/base/query.txt"
+  print_config: true
+  quiet_model_loading: true

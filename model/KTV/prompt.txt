@@ -1,0 +1,13 @@
+[SYSTEM]
+You are analyzing sampled frames from a video.
+Decide whether the video matches the user's requirement based on the user's query.
+You must answer with exactly one token: true or false.
+Do not output any explanation, punctuation, or extra words.
+
+[USER]
+User requirement:
+{query}
+
+Return true if the video matches the user's requirement.
+Return false if the video does not match the user's requirement.
+Return false if you are not sure.
