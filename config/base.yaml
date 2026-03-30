@@ -3,8 +3,10 @@
 frame_selection: 
   _target_: model.base.uniform_sampling
   _partial_: true
-  num_frames: 8
+  num_frames: 30
   max_side: 720
+
+token_selection: null
 
 vlm:
   _target_: model.base.BaseVLM
@@ -12,8 +14,11 @@ vlm:
   backend: "video_llava" # VLM마다 상속하는 인터페이스가 달라서 달라 미리 정의해둔 인터페이스 집합. 자세한 코드는 vlm.py를 참고
   dtype: "bf16" # Enum[ bf16 | fp16 | fp32 ]
   frame_selector: ${frame_selection}
+  token_selector: ${token_selection}
   processor_kwargs: {} # 전처리기 로드시 .from_pretrained() 옵션 설정
   model_kwargs: {}  # 모델 로드시 .from_pretrained() 옵션 설정
+  token_selector_kwargs: {}
+  fallback_to_standard_path: true
   generation_kwargs: # 생성시점 옵션, 출력 샘플링 / 온도 설정 / top_p등 설정 가능
     max_new_tokens: 256
     do_sample: false
