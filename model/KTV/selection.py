@@ -1,6 +1,8 @@
 import os
 import warnings
 from functools import lru_cache
+from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -8,26 +10,65 @@ import torch
 import torch.nn.functional as F
 from sklearn.cluster import KMeans
 from threadpoolctl import threadpool_limits
-from transformers import AutoImageProcessor, AutoModel
+from transformers import AutoImageProcessor, AutoModel, AutoProcessor
 
 
 DEFAULT_DINOV2_MODEL_ID = "facebook/dinov2-base"
 PRELOAD_DINOV2_ON_IMPORT = os.getenv("KTV_PRELOAD_DINOV2_ON_IMPORT", "1") == "1"
 PRELOAD_DINOV2_LOCAL_ONLY = os.getenv("KTV_PRELOAD_DINOV2_LOCAL_ONLY", "0") == "1"
 PRELOAD_DINOV2_MODEL_ID = os.getenv("KTV_PRELOAD_DINOV2_MODEL_ID", DEFAULT_DINOV2_MODEL_ID)
+DEFAULT_CLIP_MODEL_ID = "openai/clip-vit-base-patch32"
+
+DINOV2_DTYPE_MAP = {
+    "bf16": torch.bfloat16,
+    "fp16": torch.float16,
+    "fp32": torch.float32,
+}
+
+
+def _resolve_torch_dtype(dtype: str | torch.dtype | None) -> torch.dtype | None:
+    if dtype is None or isinstance(dtype, torch.dtype):
+        return dtype
+
+    try:
+        return DINOV2_DTYPE_MAP[dtype]
+    except KeyError as exc:
+        available = ", ".join(sorted(DINOV2_DTYPE_MAP))
+        raise ValueError(
+            f"Unsupported DINOv2 dtype: {dtype}. Available: {available}"
+        ) from exc
 
 
 def _read_video_frames(
     video_path: str,
     max_side: int | None = 720,
-    frame_stride: int = 1,
+    frame_stride: int | None = 1,
+    frame_stride_ratio: float | None = None,
 ) -> list[np.ndarray]:
-    if frame_stride <= 0:
-        raise ValueError(f"frame_stride must be >= 1, but got {frame_stride}.")
-
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open video: {video_path}")
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if total_frames <= 0:
+        cap.release()
+        raise RuntimeError("Failed to read total frame count.")
+
+    if frame_stride_ratio is not None:
+        if not 0.0 < frame_stride_ratio <= 1.0:
+            cap.release()
+            raise ValueError(
+                "frame_stride_ratio must be in (0, 1], "
+                f"but got {frame_stride_ratio}."
+            )
+        target_frames = max(1, int(np.ceil(total_frames * frame_stride_ratio)))
+        frame_stride = max(1, int(np.ceil(total_frames / target_frames)))
+    elif frame_stride is None:
+        frame_stride = 1
+
+    if frame_stride <= 0:
+        cap.release()
+        raise ValueError(f"frame_stride must be >= 1, but got {frame_stride}.")
 
     frames: list[np.ndarray] = []
     frame_idx = 0
@@ -68,6 +109,7 @@ def _read_video_frames(
 def _load_dinov2(
     model_id: str,
     local_files_only: bool,
+    dtype: torch.dtype | None = None,
 ):
     processor = AutoImageProcessor.from_pretrained(
         model_id,
@@ -76,6 +118,7 @@ def _load_dinov2(
     model = AutoModel.from_pretrained(
         model_id,
         local_files_only=local_files_only,
+        torch_dtype=dtype,
     )
     model.eval()
     return processor, model
@@ -96,28 +139,274 @@ def _preload_dinov2_on_import() -> None:
         )
 
 
+@lru_cache(maxsize=2)
+def _load_clip(
+    model_id: str,
+):
+    processor = AutoProcessor.from_pretrained(
+        model_id,
+        local_files_only=False,
+    )
+    model = AutoModel.from_pretrained(
+        model_id,
+        local_files_only=False,
+    )
+    model.eval()
+
+    if not hasattr(model, "get_text_features") or not hasattr(model, "get_image_features"):
+        raise TypeError(
+            "Loaded model does not expose `get_text_features` / `get_image_features`."
+        )
+
+    return processor, model
+
+
+def preload_dinov2_model(
+    model_id: str = DEFAULT_DINOV2_MODEL_ID,
+    *,
+    local_files_only: bool = False,
+    dtype: str | torch.dtype | None = None,
+) -> None:
+    """DINOv2 모델을 캐시에 미리 로드한다."""
+    model_dtype = _resolve_torch_dtype(dtype)
+    _load_dinov2(
+        model_id=model_id,
+        local_files_only=local_files_only,
+        dtype=model_dtype,
+    )
+
+
+def preload_clip_model(
+    model_id: str = DEFAULT_CLIP_MODEL_ID,
+) -> None:
+    """CLIP 모델을 캐시에 미리 로드한다."""
+    _load_clip(model_id=model_id)
+
+
+def _move_inputs_to_device(
+    inputs: dict[str, Any],
+    *,
+    device: torch.device,
+    dtype: torch.dtype | None = None,
+) -> dict[str, Any]:
+    moved: dict[str, Any] = {}
+    for key, value in inputs.items():
+        if not hasattr(value, "to"):
+            moved[key] = value
+            continue
+
+        if (
+            dtype is not None
+            and torch.is_tensor(value)
+            and value.is_floating_point()
+        ):
+            moved[key] = value.to(device=device, dtype=dtype)
+        else:
+            moved[key] = value.to(device=device)
+
+    return moved
+
+
+def _as_feature_tensor(
+    value: Any,
+    *,
+    label: str,
+) -> torch.Tensor:
+    if torch.is_tensor(value):
+        return value
+
+    for attr in ("text_embeds", "image_embeds", "pooler_output"):
+        candidate = getattr(value, attr, None)
+        if torch.is_tensor(candidate):
+            return candidate
+
+    last_hidden_state = getattr(value, "last_hidden_state", None)
+    if torch.is_tensor(last_hidden_state):
+        if last_hidden_state.ndim < 2:
+            raise ValueError(
+                f"{label} last_hidden_state must have ndim >= 2, "
+                f"but got shape={tuple(last_hidden_state.shape)}."
+            )
+        return last_hidden_state[:, 0, ...]
+
+    if isinstance(value, (tuple, list)) and value:
+        first = value[0]
+        if torch.is_tensor(first):
+            return first
+
+    raise TypeError(
+        f"{label} must be a tensor-like output, but got {type(value)!r}."
+    )
+
+
+def _video_tensor_to_images(video_tensor: torch.Tensor) -> list[np.ndarray]:
+    if video_tensor.ndim != 4:
+        raise ValueError(
+            "Expected sampled frames with shape (T, H, W, C), "
+            f"but got {tuple(video_tensor.shape)}."
+        )
+
+    frames = video_tensor.detach().cpu()
+    if frames.dtype != torch.uint8:
+        if (
+            frames.is_floating_point()
+            and frames.numel() > 0
+            and float(frames.max().item()) <= 1.0
+        ):
+            frames = frames * 255.0
+        frames = frames.clamp(0, 255).to(torch.uint8)
+
+    return [frame.numpy() for frame in frames]
+
+
+def _resolve_query_path(query_file: str) -> Path:
+    path = Path(query_file).expanduser()
+    if path.is_absolute():
+        return path
+    if path.exists():
+        return path.resolve()
+
+    repo_root = Path(__file__).resolve().parents[2]
+    return (repo_root / path).resolve()
+
+
+def _load_query_text(
+    *,
+    query: str | None = None,
+    query_file: str | None = None,
+    prompt: str | None = None,
+    use_prompt_as_query: bool = False,
+) -> str | None:
+    if query is not None:
+        query_text = query.strip()
+        if query_text:
+            return query_text
+
+    if query_file is not None:
+        query_path = _resolve_query_path(query_file)
+        if not query_path.exists():
+            raise FileNotFoundError(f"Query file not found: {query_path}")
+
+        query_text = query_path.read_text(encoding="utf-8").strip()
+        if not query_text:
+            raise ValueError(f"Query file is empty: {query_path}")
+        return query_text
+
+    if use_prompt_as_query and prompt is not None:
+        prompt_text = prompt.strip()
+        if prompt_text:
+            return prompt_text
+
+    return None
+
+
+def _compute_clip_frame_relevance(
+    *,
+    video_tensor: torch.Tensor,
+    query_text: str,
+    model_id: str = DEFAULT_CLIP_MODEL_ID,
+    dtype: str | torch.dtype | None = None,
+    device: str | torch.device | None = None,
+    batch_size: int = 16,
+) -> torch.Tensor:
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be >= 1, but got {batch_size}.")
+
+    model_dtype = _resolve_torch_dtype(dtype)
+    target_device = torch.device(
+        device if device is not None else ("cuda" if torch.cuda.is_available() else "cpu")
+    )
+    if target_device.type == "cpu" and model_dtype in {torch.float16, torch.bfloat16}:
+        model_dtype = torch.float32
+
+    processor, model = _load_clip(
+        model_id=model_id,
+    )
+    if model_dtype is not None:
+        model = model.to(device=target_device, dtype=model_dtype)
+    else:
+        model = model.to(device=target_device)
+
+    frames = _video_tensor_to_images(video_tensor)
+    if not frames:
+        raise ValueError("video_tensor must contain at least one frame.")
+
+    text_inputs = processor(
+        text=[query_text],
+        return_tensors="pt",
+        truncation=True,
+        padding=True,
+    )
+    text_inputs = _move_inputs_to_device(
+        text_inputs,
+        device=target_device,
+        dtype=model_dtype,
+    )
+
+    with torch.inference_mode():
+        text_features = _as_feature_tensor(
+            model.get_text_features(**text_inputs),
+            label="text_features",
+        )
+    if text_features.ndim == 1:
+        text_features = text_features.unsqueeze(0)
+    text_features = F.normalize(text_features.float(), dim=-1)[0]
+
+    similarities: list[torch.Tensor] = []
+    for start in range(0, len(frames), batch_size):
+        image_inputs = processor(
+            images=frames[start:start + batch_size],
+            return_tensors="pt",
+        )
+        image_inputs = _move_inputs_to_device(
+            image_inputs,
+            device=target_device,
+            dtype=model_dtype,
+        )
+        with torch.inference_mode():
+            image_features = _as_feature_tensor(
+                model.get_image_features(**image_inputs),
+                label="image_features",
+            )
+
+        image_features = F.normalize(image_features.float(), dim=-1)
+        batch_similarity = torch.matmul(image_features, text_features)
+        similarities.append(batch_similarity.cpu())
+
+    return torch.cat(similarities, dim=0)
+
+
 def _extract_frame_features(
     frames: list[np.ndarray],
     model_id: str,
     batch_size: int,
     device: torch.device,
     local_files_only: bool,
+    dtype: str | torch.dtype | None = None,
 ) -> torch.Tensor:
     if batch_size <= 0:
         raise ValueError(f"batch_size must be >= 1, but got {batch_size}.")
 
+    model_dtype = _resolve_torch_dtype(dtype)
     processor, model = _load_dinov2(
         model_id=model_id,
         local_files_only=local_files_only,
+        dtype=model_dtype,
     )
-    model = model.to(device)
+    model = model.to(device=device, dtype=model_dtype)
 
     features: list[torch.Tensor] = []
     for start in range(0, len(frames), batch_size):
         batch_frames = frames[start:start + batch_size]
         inputs = processor(images=batch_frames, return_tensors="pt")
         inputs = {
-            key: value.to(device) if hasattr(value, "to") else value
+            key: (
+                value.to(device=device, dtype=model_dtype)
+                if hasattr(value, "to") and torch.is_tensor(value) and value.is_floating_point()
+                else value.to(device)
+                if hasattr(value, "to")
+                else value
+            )
             for key, value in inputs.items()
         }
 
@@ -261,6 +550,45 @@ def _resolve_keep_ratios(
     return keep_ratios.clamp(0.0, 1.0)
 
 
+def _resolve_rank_beta_sequence(
+    *,
+    num_frames: int,
+    beta: float | list[float] | tuple[float, ...] | torch.Tensor,
+    beta_specific: list[float] | tuple[float, ...] | torch.Tensor | None = None,
+    start: float = 1.0,
+    floor: float = 0.0,
+) -> torch.Tensor:
+    """프레임 순위용 beta 시퀀스를 만든다.
+
+    우선순위:
+    1) beta_specific (명시적 시퀀스)
+    2) beta 스칼라 -> 1, 1-beta, 1-2*beta ... 형태의 등차 수열
+    3) beta 시퀀스(하위호환)
+    """
+    if beta_specific is not None:
+        sequence = torch.as_tensor(beta_specific, dtype=torch.float32)
+    elif isinstance(beta, (float, int)):
+        step = float(beta)
+        if step <= 0.0:
+            raise ValueError(f"beta must be > 0.0 when used as step, but got {step}.")
+        ranks = torch.arange(num_frames, dtype=torch.float32)
+        sequence = (float(start) - step * ranks).clamp(min=float(floor), max=1.0)
+    else:
+        sequence = torch.as_tensor(beta, dtype=torch.float32)
+
+    if sequence.ndim != 1:
+        raise ValueError("beta sequence must be 1D.")
+    if sequence.shape[0] < num_frames:
+        raise ValueError(
+            "beta sequence is shorter than sampled frames: "
+            f"len(beta)={sequence.shape[0]}, frames={num_frames}."
+        )
+    if sequence.shape[0] > num_frames:
+        sequence = sequence[:num_frames]
+
+    return sequence.clamp(0.0, 1.0)
+
+
 def _pad_selected_tokens(
     selected_tokens: list[torch.Tensor],
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -286,8 +614,10 @@ def dinov2_kmeans_keyframe_selection(
     video_path: str,
     num_keyframes: int = 8,
     max_side: int | None = 720,
-    frame_stride: int = 1,
+    frame_stride: int | None = 1,
+    frame_stride_ratio: float | None = None,
     model_id: str = "facebook/dinov2-base",
+    dtype: str | torch.dtype | None = None,
     batch_size: int = 16,
     device: str | torch.device | None = None,
     random_state: int = 0,
@@ -304,6 +634,7 @@ def dinov2_kmeans_keyframe_selection(
         video_path=video_path,
         max_side=max_side,
         frame_stride=frame_stride,
+        frame_stride_ratio=frame_stride_ratio,
     )
 
     target_device = torch.device(
@@ -316,6 +647,7 @@ def dinov2_kmeans_keyframe_selection(
         batch_size=batch_size,
         device=target_device,
         local_files_only=local_files_only,
+        dtype=dtype,
     )
 
     selected_indices = _select_representative_indices(
@@ -332,8 +664,10 @@ def remove_duplicate_frames(
     video_path: str,
     num_keyframes: int = 8,
     max_side: int | None = 720,
-    frame_stride: int = 1,
+    frame_stride: int | None = 1,
+    frame_stride_ratio: float | None = None,
     model_id: str = "facebook/dinov2-base",
+    dtype: str | torch.dtype | None = None,
     batch_size: int = 16,
     device: str | torch.device | None = None,
     random_state: int = 0,
@@ -346,7 +680,9 @@ def remove_duplicate_frames(
         num_keyframes=num_keyframes,
         max_side=max_side,
         frame_stride=frame_stride,
+        frame_stride_ratio=frame_stride_ratio,
         model_id=model_id,
+        dtype=dtype,
         batch_size=batch_size,
         device=device,
         random_state=random_state,
@@ -366,8 +702,6 @@ def key_patch_selection(
     frame_relevance: torch.Tensor | None = None,
     q_proj: torch.Tensor | None = None,
     k_proj: torch.Tensor | None = None,
-    min_tokens: int = 1,
-    preserve_spatial_order: bool = True,
 ) -> dict[str, torch.Tensor | list[torch.Tensor]]:
     """KTV 논문의 key patch selection을 텐서 레벨에서 수행한다.
 
@@ -382,8 +716,6 @@ def key_patch_selection(
             큰 beta가 배정된다.
         q_proj: importance 계산용 query projection. shape `(D, D_q)` 또는 `(D, D)`.
         k_proj: importance 계산용 key projection. shape `(D, D_q)` 또는 `(D, D)`.
-        min_tokens: frame당 최소 유지 patch 수.
-        preserve_spatial_order: top-k 선별 후 원래 patch 순서를 유지할지 여부.
 
     Returns:
         selected_tokens:
@@ -401,8 +733,6 @@ def key_patch_selection(
     """
     if not 0.0 <= alpha <= 1.0:
         raise ValueError(f"alpha must be in [0, 1], but got {alpha}.")
-    if min_tokens <= 0:
-        raise ValueError(f"min_tokens must be >= 1, but got {min_tokens}.")
 
     patch_tokens, cls_token_features = _split_patch_and_cls_tokens(
         token_features=token_features,
@@ -418,7 +748,7 @@ def key_patch_selection(
     ).to(device=patch_tokens.device)
 
     keep_counts = torch.ceil(keep_ratios * num_patches).to(dtype=torch.long)
-    keep_counts = keep_counts.clamp(min=min_tokens, max=num_patches)
+    keep_counts = keep_counts.clamp(min=1, max=num_patches)
 
     query_tokens = cls_token_features
     key_tokens = patch_tokens
@@ -463,10 +793,9 @@ def key_patch_selection(
             final_scores[frame_idx],
             k=frame_keep,
             largest=True,
-            sorted=not preserve_spatial_order,
+            sorted=False,
         ).indices
-        if preserve_spatial_order:
-            frame_indices = torch.sort(frame_indices).values
+        frame_indices = torch.sort(frame_indices).values
 
         selected_patch_indices.append(frame_indices)
         frame_tokens = patch_tokens[frame_idx, frame_indices]
@@ -507,9 +836,90 @@ def key_patch_selection(
     }
 
 
+def query_conditioned_key_patch_selection(
+    token_features: torch.Tensor,
+    cls_tokens: torch.Tensor | None = None,
+    *,
+    has_cls_token: bool = True,
+    keep_cls_token: bool = True,
+    alpha: float = 0.8,
+    beta: float | list[float] | tuple[float, ...] | torch.Tensor = 0.25,
+    beta_specific: list[float] | tuple[float, ...] | torch.Tensor | None = None,
+    frame_relevance: torch.Tensor | None = None,
+    q_proj: torch.Tensor | None = None,
+    k_proj: torch.Tensor | None = None,
+    query: str | None = None,
+    query_file: str | None = None,
+    prompt: str | None = None,
+    video_tensor: torch.Tensor | None = None,
+    use_prompt_as_query: bool = False,
+    clip_model_id: str = DEFAULT_CLIP_MODEL_ID,
+    clip_dtype: str | torch.dtype | None = None,
+    clip_device: str | torch.device | None = None,
+    clip_batch_size: int = 16,
+    beta_start: float = 1.0,
+    beta_floor: float = 0.0,
+    **_: Any,
+) -> dict[str, Any]:
+    """쿼리-프레임(CLIP) 관련도 순위로 beta 집합을 프레임에 배정한다.
+
+    - beta_specific: 명시적 내림차순 비율 리스트
+    - beta(스칼라): 1, 1-beta, 1-2*beta ... 등차수열 자동 생성
+    """
+    resolved_relevance = None if frame_relevance is None else torch.as_tensor(frame_relevance)
+    if resolved_relevance is None:
+        query_text = _load_query_text(
+            query=query,
+            query_file=query_file,
+            prompt=prompt,
+            use_prompt_as_query=use_prompt_as_query,
+        )
+        if query_text is not None:
+            if video_tensor is None:
+                raise ValueError(
+                    "video_tensor is required to compute query-conditioned frame relevance."
+                )
+            resolved_relevance = _compute_clip_frame_relevance(
+                video_tensor=video_tensor,
+                query_text=query_text,
+                model_id=clip_model_id,
+                dtype=clip_dtype,
+                device=clip_device,
+                batch_size=clip_batch_size,
+            )
+
+    num_frames = int(token_features.shape[0])
+    effective_beta = _resolve_rank_beta_sequence(
+        num_frames=num_frames,
+        beta=beta,
+        beta_specific=beta_specific,
+        start=beta_start,
+        floor=beta_floor,
+    )
+    effective_frame_relevance = resolved_relevance
+
+    outputs = key_patch_selection(
+        token_features=token_features,
+        cls_tokens=cls_tokens,
+        has_cls_token=has_cls_token,
+        keep_cls_token=keep_cls_token,
+        alpha=alpha,
+        beta=effective_beta,
+        frame_relevance=effective_frame_relevance,
+        q_proj=q_proj,
+        k_proj=k_proj,
+    )
+    if resolved_relevance is not None:
+        outputs["frame_relevance"] = resolved_relevance.detach().cpu()
+    return outputs
+
+
 __all__ = [
     "dinov2_kmeans_keyframe_selection",
     "key_patch_selection",
+    "preload_clip_model",
+    "preload_dinov2_model",
+    "query_conditioned_key_patch_selection",
     "remove_duplicate_frames",
 ]
 

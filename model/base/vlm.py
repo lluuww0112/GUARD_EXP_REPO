@@ -6,9 +6,12 @@ from typing import Any
 
 import torch
 from transformers import (
+    AutoConfig,
     AutoModelForImageTextToText,
     AutoProcessor,
     GenerationMixin,
+    LlavaNextForConditionalGeneration,
+    LlavaNextProcessor,
     PreTrainedModel,
     ProcessorMixin,
     Qwen2VLForConditionalGeneration,
@@ -28,11 +31,26 @@ DTYPE_MAP = {
     "fp32": torch.float32,
 }
 
+BACKEND_MODEL_TYPE_HINTS = {
+    "video_llava": {"video_llava"},
+    "llava_next": {"llava_next"},
+    "qwen2_vl": {"qwen2_vl", "qwen2_5_vl"},
+}
+
+BACKEND_SUGGESTED_MODEL_IDS = {
+    "llava_next": "llava-hf/llava-v1.6-mistral-7b-hf",
+}
+
+
 
 VLM_BACKENDS = {
     "video_llava": {
         "processor_cls": VideoLlavaProcessor,
         "model_cls": VideoLlavaForConditionalGeneration,
+    },
+    "llava_next": {
+        "processor_cls": LlavaNextProcessor,
+        "model_cls": LlavaNextForConditionalGeneration,
     },
     "qwen2_vl": {
         "processor_cls": Qwen2VLProcessor,
@@ -111,6 +129,7 @@ class BaseVLM(VLMInterface):
     ) -> tuple[ProcessorMixin, PreTrainedModel | GenerationMixin]:
         use_cuda = torch.cuda.is_available()
         dtype = self.dtype or (torch.float16 if use_cuda else torch.float32)
+        self._validate_backend_model_type(model_id)
 
         processor = self.processor_cls.from_pretrained(
             model_id,
@@ -128,6 +147,54 @@ class BaseVLM(VLMInterface):
 
         model.eval()
         return processor, model
+
+    def _extract_config_load_kwargs(self) -> dict[str, Any]:
+        config_kwargs: dict[str, Any] = {}
+        for source_kwargs in (self.processor_kwargs, self.model_kwargs):
+            for key in (
+                "cache_dir",
+                "force_download",
+                "local_files_only",
+                "revision",
+                "subfolder",
+                "token",
+                "trust_remote_code",
+            ):
+                if key in source_kwargs:
+                    config_kwargs[key] = source_kwargs[key]
+        return config_kwargs
+
+    def _validate_backend_model_type(
+        self,
+        model_id: str,
+    ) -> None:
+        expected_model_types = BACKEND_MODEL_TYPE_HINTS.get(self.backend)
+        if not expected_model_types:
+            return
+
+        config_kwargs = self._extract_config_load_kwargs()
+        try:
+            config = AutoConfig.from_pretrained(model_id, **config_kwargs)
+        except Exception:
+            # If config probing fails, defer to the original model loading error path.
+            return
+
+        model_type = str(getattr(config, "model_type", "")).lower()
+        if not model_type or model_type in expected_model_types:
+            return
+
+        expected_display = ", ".join(sorted(expected_model_types))
+        suggestion = BACKEND_SUGGESTED_MODEL_IDS.get(self.backend)
+        suggestion_text = (
+            f" For example, use `{suggestion}`."
+            if suggestion is not None
+            else ""
+        )
+        raise ValueError(
+            f"Incompatible backend/model pair: backend `{self.backend}` expects "
+            f"`config.model_type` in {{{expected_display}}}, but `{model_id}` has "
+            f"`config.model_type={model_type}`.{suggestion_text}"
+        )
 
     def _prepare_prompt(self, prompt: str, has_video: bool) -> str:
         prompt = prompt.strip()

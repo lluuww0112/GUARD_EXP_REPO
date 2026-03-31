@@ -65,7 +65,20 @@ def load_prompt(invoke_config: DictConfig) -> str:
 
 
 def build_vlm(config: DictConfig) -> VLMInterface:
-    vlm = instantiate(config.vlm)
+    try:
+        vlm = instantiate(config.vlm)
+    except Exception as exc:
+        message = str(exc)
+        if "ignore_mismatched_sizes" in message:
+            model_id = config.vlm.get("model_id")
+            backend = config.vlm.get("backend")
+            raise RuntimeError(
+                "VLM checkpoint loading failed due to backend/checkpoint incompatibility. "
+                f"backend=`{backend}`, model_id=`{model_id}`. "
+                "Set `invoke.quiet_model_loading=false` to inspect the full Transformers "
+                "loading report, and use a checkpoint architecture that matches the backend."
+            ) from exc
+        raise
     if not isinstance(vlm, VLMInterface):
         raise TypeError("Instantiated `vlm` does not implement VLMInterface.")
     return vlm
@@ -163,7 +176,6 @@ def main(config: DictConfig) -> None:
     print(f"Selection   : {summary['frame_selection']['_target_']}")
     print(f"Prompt File : {summary['invoke']['prompt_file']}")
     print(f"Query File  : {summary['invoke']['query_file']}")
-    print(f"Prompt      : {prompt}")
     print()
 
     start_time = time.perf_counter()

@@ -1,30 +1,38 @@
 frame_selection:
   _target_: model.KTV.remove_duplicate_frames
   _partial_: true
-  num_keyframes: 30
+  num_keyframes: 6
   max_side: 720
-  frame_stride: 25 # 초기 프레임을 선택하는 간격, 1로 설정시 모든 프레임을 선택
+  frame_stride: 1 # 고정 stride를 쓰려면 정수로 설정 (균등 샘플링)
+  frame_stride_ratio: null # 전체 프레임 중 약 2.5%만 1차 후보로 사용. 설정 시 frame_stride보다 우선
   model_id: "facebook/dinov2-base"
-  batch_size: 128 # dino 임베딩하는 배치 사이즈
+  batch_size: 512 # dino 임베딩하는 배치 사이즈
   device: null
   random_state: 0
-  num_threads: 10 # null이면 라이브러리 기본값 사용, 예: 8
+  num_threads: 20 # null이면 라이브러리 기본값 사용, 예: 8
   local_files_only: false
 
 token_selection:
-  _target_: model.KTV.key_patch_selection
+  _target_: model.KTV.query_conditioned_key_patch_selection
   _partial_: true
   has_cls_token: true
   keep_cls_token: true
   alpha: 0.8
-  beta: 0.25
-  min_tokens: 1
-  preserve_spatial_order: true
+  beta: 0.25 # 자동 생성: 1.0, 0.75, 0.5, ... (beta_specific이 있으면 무시됨)
+  beta_specific: [1, 0.75, 0.5, 0.3, 0.3, 0.3] # 예: [0.9, 0.75, 0.6, ...]
+  # beta_specific: null
+  beta_start: 1.0
+  beta_floor: 0.2
+  query_file: "model/KTV/query.txt"
+  clip_model_id: "openai/clip-vit-base-patch32"
+  clip_batch_size: 32 # 키프레임 선택 갯수보다 약간 크게 설정
 
 vlm:
-  _target_: model.base.BaseVLM
-  model_id: "LanguageBind/Video-LLaVA-7B-hf"
-  backend: "video_llava"
+  _target_: model.KTV.KTVSelector
+  model_id: "LanguageBind/Video-LLaVA-7B-hf" 
+  backend: "video_llava" # Video-LLaVA 계열에서 사용
+  # model_id: "llava-hf/llama3-llava-next-8b-hf"
+  # backend: "llava_next"
   dtype: "bf16"
   frame_selector: ${frame_selection}
   token_selector: ${token_selection}
@@ -33,12 +41,13 @@ vlm:
   token_selector_kwargs: {}
   fallback_to_standard_path: true
   generation_kwargs:
+    do_sample: true
+    top_p: 0.9
     max_new_tokens: 256
-    do_sample: false
 
 invoke:
   video_path: "./data/fcN5HGqVzC0.mp4"
-  prompt_file: "model/base/prompt.txt"
-  query_file: "model/base/query.txt"
-  print_config: true
+  prompt_file: "model/KTV/prompt.txt"
+  query_file: "model/KTV/query.txt"
+  print_config: false
   quiet_model_loading: true

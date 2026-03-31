@@ -3,7 +3,7 @@
 frame_selection: 
   _target_: model.base.uniform_sampling
   _partial_: true
-  num_frames: 30
+  num_frames: 10
   max_side: 720
 
 token_selection: null
@@ -20,8 +20,9 @@ vlm:
   token_selector_kwargs: {}
   fallback_to_standard_path: true
   generation_kwargs: # 생성시점 옵션, 출력 샘플링 / 온도 설정 / top_p등 설정 가능
+    do_sample: true
+    top_p: 0.9
     max_new_tokens: 256
-    do_sample: false
 
 invoke: 
   video_path: "./data/fcN5HGqVzC0.mp4"
