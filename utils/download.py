@@ -28,11 +28,18 @@ def download_video(url: str, output_dir: Path) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     has_ffmpeg = shutil.which("ffmpeg") is not None
 
+    # Prefer H.264/MP4 streams so OpenCV can decode them reliably in Colab.
+    preferred_mp4 = (
+        "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/"
+        "bestvideo[ext=mp4][vcodec!*=av01]+bestaudio[ext=m4a]/"
+        "best[ext=mp4][vcodec!*=av01]/"
+        "best[ext=mp4]/best"
+    )
     ydl_opts = {
         "outtmpl": str(output_dir / "%(id)s.%(ext)s"),
         "restrictfilenames": True,
         "noplaylist": True,
-        "format": "bestvideo+bestaudio/best" if has_ffmpeg else "best[ext=mp4]/best",
+        "format": preferred_mp4 if has_ffmpeg else "best[ext=mp4][vcodec!*=av01]/best[ext=mp4]/best",
     }
     if has_ffmpeg:
         ydl_opts["merge_output_format"] = "mp4"

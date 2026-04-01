@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
 from typing import Any
 
 import cv2
@@ -11,6 +15,73 @@ import torch
 QWEN_VISION_FACTOR = 28
 QWEN_MIN_PIXELS = 56 * 56
 QWEN_MAX_PIXELS = 14 * 14 * 4 * 1280
+
+
+def _inspect_video_capture(video_path: str) -> tuple[cv2.VideoCapture, int, float]:
+    cap = cv2.VideoCapture(video_path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) if cap.isOpened() else 0
+    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0) if cap.isOpened() else 0.0
+    return cap, total_frames, fps
+
+
+def _transcode_video_for_opencv(video_path: str) -> Path | None:
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path is None:
+        return None
+
+    temp_dir = Path(tempfile.mkdtemp(prefix="guard_opencv_decode_"))
+    output_path = temp_dir / f"{Path(video_path).stem}_opencv_h264.mp4"
+    command = [
+        ffmpeg_path,
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        video_path,
+        "-an",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        str(output_path),
+    ]
+
+    try:
+        subprocess.run(command, check=True)
+    except (OSError, subprocess.CalledProcessError):
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return None
+
+    return output_path if output_path.exists() else None
+
+
+def _open_video_for_sampling(
+    video_path: str,
+) -> tuple[cv2.VideoCapture, int, float, Path | None]:
+    cap, total_frames, fps = _inspect_video_capture(video_path)
+    if cap.isOpened() and total_frames > 0:
+        return cap, total_frames, fps, None
+
+    cap.release()
+    transcoded_path = _transcode_video_for_opencv(video_path)
+    if transcoded_path is None:
+        raise RuntimeError(
+            "Failed to decode video with OpenCV. "
+            "This often happens in Colab when the source video uses AV1. "
+            "Install ffmpeg with AV1 software decoding support or transcode the video "
+            "to H.264 before running frame selection."
+        )
+
+    cap, total_frames, fps = _inspect_video_capture(str(transcoded_path))
+    if cap.isOpened() and total_frames > 0:
+        return cap, total_frames, fps, transcoded_path
+
+    cap.release()
+    shutil.rmtree(transcoded_path.parent, ignore_errors=True)
+    raise RuntimeError(
+        "Failed to decode video even after ffmpeg transcoding fallback. "
+        f"source={video_path}"
+    )
 
 
 @dataclass(slots=True)
@@ -107,19 +178,10 @@ def uniform_sampling(
     ensure_qwen_compatibility: bool = True,
     qwen_factor: int = QWEN_VISION_FACTOR,
 ) -> FrameSelectionResult:
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Failed to open video: {video_path}")
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
-    if total_frames <= 0:
-        cap.release()
-        raise RuntimeError("Failed to read total frame count.")
-
     if num_frames <= 0:
-        cap.release()
         raise ValueError(f"`num_frames` must be positive, got {num_frames}.")
+
+    cap, total_frames, fps, transcoded_path = _open_video_for_sampling(video_path)
 
     if num_frames == 1:
         indices = [total_frames // 2]
@@ -131,25 +193,28 @@ def uniform_sampling(
     sampled_indices: list[int] = []
     frame_idx = 0
 
-    while True:
-        ok, frame_bgr = cap.read()
-        if not ok:
-            break
+    try:
+        while True:
+            ok, frame_bgr = cap.read()
+            if not ok:
+                break
 
-        if frame_idx in target_set:
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            frame_rgb = _resize_frame(
-                frame_rgb,
-                max_side=max_side,
-                ensure_qwen_compatibility=ensure_qwen_compatibility,
-                qwen_factor=qwen_factor,
-            )
-            frames.append(frame_rgb)
-            sampled_indices.append(frame_idx)
+            if frame_idx in target_set:
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                frame_rgb = _resize_frame(
+                    frame_rgb,
+                    max_side=max_side,
+                    ensure_qwen_compatibility=ensure_qwen_compatibility,
+                    qwen_factor=qwen_factor,
+                )
+                frames.append(frame_rgb)
+                sampled_indices.append(frame_idx)
 
-        frame_idx += 1
-
-    cap.release()
+            frame_idx += 1
+    finally:
+        cap.release()
+        if transcoded_path is not None:
+            shutil.rmtree(transcoded_path.parent, ignore_errors=True)
 
     if len(frames) != len(indices):
         raise RuntimeError(
@@ -170,6 +235,7 @@ def uniform_sampling(
     video_np = np.stack(normalized_frames, axis=0)
     metadata = {
         "video_path": video_path,
+        "decoded_video_path": str(transcoded_path) if transcoded_path is not None else video_path,
         "sampled_indices": sampled_indices,
         "num_frames": len(normalized_frames),
         "total_frames": total_frames,
