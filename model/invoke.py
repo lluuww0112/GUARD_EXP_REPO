@@ -19,7 +19,7 @@ from omegaconf import DictConfig, OmegaConf
 from model.base import VLMInterface
 
 
-def load_prompt(invoke_config: DictConfig) -> str:
+def load_prompt(invoke_config: DictConfig) -> dict[str, str]:
     prompt_file = invoke_config.get("prompt_file")
     if not prompt_file:
         raise ValueError("`invoke.prompt_file` must be provided in the config.")
@@ -59,9 +59,10 @@ def load_prompt(invoke_config: DictConfig) -> str:
         raise ValueError(f"`[USER]` section is missing in prompt file: {prompt_path}")
 
     user_prompt = user_prompt.format(query=str(query))
-    if system_prompt:
-        return f"System:\n{system_prompt}\n\nUser:\n{user_prompt}"
-    return user_prompt
+    return {
+        "system": system_prompt,
+        "user": user_prompt,
+    }
 
 
 def build_vlm(config: DictConfig) -> VLMInterface:
@@ -126,6 +127,12 @@ def suppress_model_loading_output(enabled: bool) -> Iterator[None]:
 
 def summarize_config(config: DictConfig) -> dict[str, Any]:
     frame_selection = OmegaConf.to_container(config.frame_selection, resolve=True)
+    patch_selection_cfg = config.get("patch_selection")
+    patch_selection = (
+        OmegaConf.to_container(patch_selection_cfg, resolve=True)
+        if patch_selection_cfg is not None
+        else None
+    )
     generation_kwargs = OmegaConf.to_container(
         config.vlm.get("generation_kwargs"),
         resolve=True,
@@ -134,6 +141,7 @@ def summarize_config(config: DictConfig) -> dict[str, Any]:
 
     return {
         "frame_selection": frame_selection,
+        "patch_selection": patch_selection,
         "invoke": invoke_config,
         "model_id": config.vlm.get("model_id"),
         "backend": config.vlm.get("backend"),
@@ -179,7 +187,11 @@ def main(config: DictConfig) -> None:
     resolved_model_source = getattr(vlm, "resolved_model_source", None)
     if resolved_model_source and str(resolved_model_source) != str(summary["model_id"]):
         print(f"Load Source : {resolved_model_source}")
-    print(f"Selection   : {summary['frame_selection']['_target_']}")
+    frame_target = summary["frame_selection"]["_target_"]
+    print(f"Frame Layer : {frame_target}")
+    patch_selection = summary.get("patch_selection")
+    if patch_selection is not None:
+        print(f"Patch Layer : {patch_selection['_target_']}")
     print(f"Prompt File : {summary['invoke']['prompt_file']}")
     print(f"Query File  : {summary['invoke']['query_file']}")
     print()

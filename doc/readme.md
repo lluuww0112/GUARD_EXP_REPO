@@ -70,8 +70,8 @@ frame_selection:
 
 vlm:
   _target_: model.base.BaseVLM
-  model_id: "LanguageBind/Video-LLaVA-7B-hf"
-  backend: "video_llava"
+  model_id: "Qwen/Qwen2.5-VL-7B-Instruct"
+  backend: "qwen2_5_vl"
   dtype: "bf16"
   frame_selector: ${frame_selection}
   generation_kwargs:
@@ -159,8 +159,8 @@ frame_selection:
 
 vlm:
   _target_: model.AIM.aim_merge_pruning.AIMVLM
-  model_id: "LanguageBind/Video-LLaVA-7B-hf"
-  backend: "video_llava"
+  model_id: "Qwen/Qwen2.5-VL-7B-Instruct"
+  backend: "qwen2_5_vl"
   dtype: "bf16"
   frame_selector: ${frame_selection}
   generation_kwargs:

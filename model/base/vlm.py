@@ -1,8 +1,11 @@
-import inspect
+from __future__ import annotations
+
 import importlib.util
+import inspect
+from types import MethodType
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -20,13 +23,14 @@ from transformers import (
     Qwen2VLProcessor,
     Qwen2_5_VLForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
-    VideoLlavaForConditionalGeneration,
-    VideoLlavaProcessor,
 )
 
+from .selection import FrameSelectionResult, PatchSelectionResult
 
-FrameSelector = Callable[..., torch.Tensor]
-TokenSelector = Callable[..., Any]
+
+FrameSelector = Callable[..., torch.Tensor | FrameSelectionResult | None]
+PatchSelector = Callable[..., Any]
+PromptInput = str | Mapping[str, Any]
 
 
 DTYPE_MAP = {
@@ -43,14 +47,17 @@ DEFAULT_VISION_SKIP_MODULES = (
     "image_tower",
     "video_tower",
 )
+DEFAULT_CUDA_ATTN_IMPLEMENTATION = "eager"
 
 BACKEND_MODEL_TYPE_HINTS = {
-    "video_llava": {"video_llava"},
     "qwen2_vl": {"qwen2_vl", "qwen2_5_vl"},
+    "qwen2_5_vl": {"qwen2_5_vl"},
+    "qwen3_vl": {"qwen3_vl"},
 }
 
 BACKEND_SUGGESTED_MODEL_IDS = {
-    "llava_next": "llava-hf/llava-v1.6-mistral-7b-hf",
+    "qwen2_5_vl": "Qwen/Qwen2.5-VL-7B-Instruct",
+    "qwen3_vl": "Qwen/Qwen3-VL-8B-Instruct",
 }
 
 SNAPSHOT_DOWNLOAD_KEYS = (
@@ -71,21 +78,16 @@ def _sanitize_model_id_for_path(model_id: str) -> str:
     )
 
 
-
 VLM_BACKENDS = {
-    "video_llava": {
-        "processor_cls": VideoLlavaProcessor,
-        "model_cls": VideoLlavaForConditionalGeneration,
-    },
     "qwen2_vl": {
         "processor_cls": Qwen2VLProcessor,
         "model_cls": Qwen2VLForConditionalGeneration,
     },
-    "qwen2_5_vl":{
+    "qwen2_5_vl": {
         "processor_cls": AutoProcessor,
         "model_cls": Qwen2_5_VLForConditionalGeneration,
     },
-    "qwen3_vl":{
+    "qwen3_vl": {
         "processor_cls": AutoProcessor,
         "model_cls": Qwen3VLForConditionalGeneration,
     },
@@ -108,7 +110,7 @@ class VLMInterface(ABC):
     def answer(
         self,
         video_path: str,
-        prompt: str,
+        prompt: PromptInput,
         **frame_selector_kwargs: Any,
     ) -> str:
         raise NotImplementedError
@@ -119,15 +121,13 @@ class BaseVLM(VLMInterface):
         self,
         model_id: str,
         frame_selector: FrameSelector,
-        token_selector: TokenSelector | None = None,
-        backend: str = "auto",
+        patch_selector: PatchSelector | None = None,
+        backend: str = "qwen2_5_vl",
         processor_kwargs: dict[str, Any] | None = None,
         model_kwargs: dict[str, Any] | None = None,
         generation_kwargs: dict[str, Any] | None = None,
         dtype: str | torch.dtype | None = None,
         quantization: dict[str, Any] | None = None,
-        token_selector_kwargs: dict[str, Any] | None = None,
-        fallback_to_standard_path: bool = True,
         local_model_dir: str | None = None,
         **frame_selector_kwargs: Any,
     ):
@@ -138,7 +138,7 @@ class BaseVLM(VLMInterface):
         backend_config = VLM_BACKENDS[backend]
 
         self.frame_selector = frame_selector
-        self.token_selector = token_selector
+        self.patch_selector = patch_selector
         self.frame_selector_kwargs = frame_selector_kwargs
         self.backend = backend
         self.processor_cls = backend_config["processor_cls"]
@@ -148,17 +148,16 @@ class BaseVLM(VLMInterface):
         self.generation_kwargs = dict(generation_kwargs or {})
         self.dtype = DTYPE_MAP[dtype] if isinstance(dtype, str) else dtype
         self.quantization = dict(quantization or {})
-        self.token_selector_kwargs = dict(token_selector_kwargs or {})
-        self.fallback_to_standard_path = fallback_to_standard_path
         self.local_model_dir = (
             Path(local_model_dir).expanduser()
             if local_model_dir is not None
             else None
         )
         self.resolved_model_source = model_id
-        self.last_token_selection_info: dict[str, Any] = {
+        self.last_patch_selection_info: dict[str, Any] = {
             "applied": False,
             "backend": backend,
+            "reason": "not_run",
         }
 
         self.processor: ProcessorMixin
@@ -182,6 +181,7 @@ class BaseVLM(VLMInterface):
         model_loading_kwargs = {
             "torch_dtype": dtype,
             "device_map": "auto" if use_cuda else None,
+            **self._build_runtime_model_kwargs(use_cuda=use_cuda),
             **quantization_kwargs,
             **self.model_kwargs,
         }
@@ -193,13 +193,67 @@ class BaseVLM(VLMInterface):
         if not use_cuda:
             model.to("cpu")
 
+        self._apply_backend_runtime_workarounds(model)
         model.eval()
         return processor, model
+
+    def _build_runtime_model_kwargs(
+        self,
+        *,
+        use_cuda: bool,
+    ) -> dict[str, Any]:
+        if not use_cuda:
+            return {}
+        if "attn_implementation" in self.model_kwargs:
+            return {}
+
+        # CUDA 13 environments can fail when Transformers/PyTorch pick NVRTC-backed
+        # kernels for multimodal metadata reductions, so prefer the safer eager path.
+        return {"attn_implementation": DEFAULT_CUDA_ATTN_IMPLEMENTATION}
 
     def _resolve_dtype(self, dtype_value: Any) -> Any:
         if isinstance(dtype_value, str):
             return DTYPE_MAP.get(dtype_value.lower(), dtype_value)
         return dtype_value
+
+    def _apply_backend_runtime_workarounds(
+        self,
+        model: PreTrainedModel | GenerationMixin,
+    ) -> None:
+        if self.backend != "qwen3_vl":
+            return
+
+        model_core = getattr(model, "model", None)
+        if model_core is None or not hasattr(model_core, "get_image_features"):
+            return
+
+        def patched_get_image_features(
+            core_self: Any,
+            pixel_values: torch.FloatTensor,
+            image_grid_thw: torch.LongTensor | None = None,
+            **kwargs: Any,
+        ) -> Any:
+            pixel_values = pixel_values.type(core_self.visual.dtype)
+            vision_output = core_self.visual(
+                pixel_values,
+                grid_thw=image_grid_thw,
+                return_dict=True,
+                **kwargs,
+            )
+            image_embeds = vision_output.pooler_output
+            if image_grid_thw is None:
+                return vision_output
+
+            # Avoid CUDA NVRTC JIT for Tensor.prod() on CUDA metadata tensors.
+            split_sizes = [
+                int(grid_t) * int(grid_h) * int(grid_w)
+                // (core_self.visual.spatial_merge_size**2)
+                for grid_t, grid_h, grid_w in image_grid_thw.detach().cpu().tolist()
+            ]
+            vision_output.pooler_output = torch.split(image_embeds, split_sizes)
+            return vision_output
+
+        model_core.get_image_features = MethodType(patched_get_image_features, model_core)
 
     def _build_quantization_kwargs(
         self,
@@ -378,7 +432,75 @@ class BaseVLM(VLMInterface):
             f"`config.model_type={model_type}`.{suggestion_text}"
         )
 
-    def _prepare_prompt(self, prompt: str, has_video: bool) -> str:
+    def _normalize_frame_selection_output(
+        self,
+        selection_output: torch.Tensor | FrameSelectionResult | None,
+        *,
+        video_path: str,
+    ) -> FrameSelectionResult:
+        if selection_output is None:
+            return FrameSelectionResult(
+                frames=None,  # type: ignore[arg-type]
+                metadata={"video_path": video_path, "num_frames": 0},
+            )
+        if isinstance(selection_output, FrameSelectionResult):
+            metadata = dict(selection_output.metadata)
+            metadata.setdefault("video_path", video_path)
+            return FrameSelectionResult(
+                frames=selection_output.frames,
+                metadata=metadata,
+            )
+        if torch.is_tensor(selection_output):
+            return FrameSelectionResult(
+                frames=selection_output,
+                metadata={
+                    "video_path": video_path,
+                    "num_frames": int(selection_output.shape[0]),
+                },
+            )
+        raise TypeError(
+            "Frame selector output must be a torch.Tensor, FrameSelectionResult, or None."
+        )
+
+    def _normalize_prompt_input(
+        self,
+        prompt: PromptInput,
+    ) -> tuple[str, str]:
+        if isinstance(prompt, Mapping):
+            system_prompt = str(prompt.get("system", "") or "").strip()
+            user_prompt = str(prompt.get("user", "") or "").strip()
+        else:
+            system_prompt = ""
+            user_prompt = str(prompt).strip()
+
+        if not user_prompt:
+            raise ValueError("Prompt must include a non-empty user prompt.")
+        return system_prompt, user_prompt
+
+    def _build_chat_messages(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        has_video: bool,
+    ) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
+        if system_prompt:
+            messages.append(
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": system_prompt}],
+                }
+            )
+
+        user_content: list[dict[str, Any]] = []
+        if has_video:
+            user_content.append({"type": "video"})
+        user_content.append({"type": "text", "text": user_prompt})
+        messages.append({"role": "user", "content": user_content})
+        return messages
+
+    def _prepare_legacy_prompt(self, prompt: str, has_video: bool) -> str:
         prompt = prompt.strip()
         if not has_video:
             return prompt
@@ -386,31 +508,141 @@ class BaseVLM(VLMInterface):
         video_token = getattr(self.processor, "video_token", None)
         if isinstance(video_token, str) and video_token and video_token not in prompt:
             prompt = f"{video_token}\n{prompt}"
-
-        if self.backend == "video_llava":
-            if not prompt.startswith("USER:"):
-                prompt = f"USER: {prompt}"
-            if "ASSISTANT:" not in prompt:
-                prompt = f"{prompt}\nASSISTANT:"
-
         return prompt
+
+    def _prepare_text_input(
+        self,
+        prompt: PromptInput,
+        *,
+        has_video: bool,
+    ) -> str:
+        system_prompt, user_prompt = self._normalize_prompt_input(prompt)
+        if hasattr(self.processor, "apply_chat_template"):
+            messages = self._build_chat_messages(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                has_video=has_video,
+            )
+            return self.processor.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+            )
+
+        prompt_text = user_prompt
+        if system_prompt:
+            prompt_text = f"System:\n{system_prompt}\n\nUser:\n{user_prompt}"
+        return self._prepare_legacy_prompt(prompt_text, has_video=has_video)
+
+    def _build_video_metadata(
+        self,
+        frame_selection: FrameSelectionResult,
+    ) -> dict[str, Any] | None:
+        video_tensor = frame_selection.frames
+        if video_tensor is None:
+            return None
+
+        metadata = dict(frame_selection.metadata)
+        total_num_frames = metadata.get("total_frames")
+        if total_num_frames is None:
+            total_num_frames = int(video_tensor.shape[0])
+
+        fps = metadata.get("fps")
+        sampled_indices = metadata.get("sampled_indices")
+        if sampled_indices is None:
+            sampled_indices = list(range(int(video_tensor.shape[0])))
+
+        height = metadata.get("height")
+        width = metadata.get("width")
+        if (height is None or width is None) and video_tensor.ndim == 4:
+            height = int(video_tensor.shape[1])
+            width = int(video_tensor.shape[2])
+
+        duration = metadata.get("duration")
+        if duration is None and fps:
+            duration = float(total_num_frames) / float(fps)
+
+        return {
+            "total_num_frames": int(total_num_frames),
+            "fps": float(fps) if fps is not None else None,
+            "frames_indices": list(sampled_indices),
+            "height": int(height) if height is not None else None,
+            "width": int(width) if width is not None else None,
+            "duration": float(duration) if duration is not None else None,
+        }
 
     def _build_model_inputs(
         self,
-        prompt: str,
+        prompt_text: str,
         video_tensor: torch.Tensor | None,
+        frame_selection: FrameSelectionResult | None = None,
     ) -> dict[str, Any]:
-        inputs = self.processor(
-            text=prompt,
-            videos=video_tensor,
-            return_tensors="pt",
-        )
+        processor_inputs: dict[str, Any] = {
+            "text": [prompt_text],
+            "return_tensors": "pt",
+        }
+        if video_tensor is not None:
+            processor_inputs["videos"] = [video_tensor]
+            # The frame selector already sampled frames, so Qwen processors
+            # should not re-sample the tensor again with their internal fps logic.
+            processor_inputs["do_sample_frames"] = False
+            if frame_selection is not None:
+                video_metadata = self._build_video_metadata(frame_selection)
+                if video_metadata is not None:
+                    processor_inputs["video_metadata"] = [video_metadata]
+
+        processor_attempts = [
+            {
+                **processor_inputs,
+                "return_mm_token_type_ids": True,
+            },
+            dict(processor_inputs),
+        ]
+        if "do_sample_frames" in processor_inputs:
+            processor_attempts.extend(
+                [
+                    {
+                        key: value
+                        for key, value in processor_inputs.items()
+                        if key != "do_sample_frames"
+                    }
+                    | {"return_mm_token_type_ids": True},
+                    {
+                        key: value
+                        for key, value in processor_inputs.items()
+                        if key != "do_sample_frames"
+                    },
+                ]
+            )
+
+        last_error: TypeError | None = None
+        inputs = None
+        for attempt_kwargs in processor_attempts:
+            try:
+                inputs = self.processor(**attempt_kwargs)
+                break
+            except TypeError as exc:
+                last_error = exc
+
+        if inputs is None:
+            raise last_error or RuntimeError("Failed to build processor inputs.")
 
         device = self.model.device
         return {
-            key: value.to(device) if hasattr(value, "to") else value
+            key: self._move_model_input_to_device(key, value, device=device)
             for key, value in inputs.items()
         }
+
+    def _move_model_input_to_device(
+        self,
+        key: str,
+        value: Any,
+        *,
+        device: torch.device,
+    ) -> Any:
+        if not hasattr(value, "to"):
+            return value
+        return value.to(device)
 
     def _decode_generation_output(
         self,
@@ -426,87 +658,110 @@ class BaseVLM(VLMInterface):
             clean_up_tokenization_spaces=True,
         )[0].strip()
 
+    def _prepare_generation_model_inputs(
+        self,
+        model_inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        if self.backend != "qwen3_vl":
+            return model_inputs
+
+        video_grid_thw = model_inputs.get("video_grid_thw")
+        mm_token_type_ids = model_inputs.get("mm_token_type_ids")
+        if video_grid_thw is None or mm_token_type_ids is None:
+            return model_inputs
+
+        expanded_rows: list[list[int]] = []
+        for row in video_grid_thw.detach().cpu().tolist():
+            grid_t, grid_h, grid_w = (int(row[0]), int(row[1]), int(row[2]))
+            expanded_rows.extend([[1, grid_h, grid_w]] * grid_t)
+
+        if not expanded_rows:
+            return model_inputs
+
+        expanded_video_grid_thw = torch.tensor(
+            expanded_rows,
+            device=video_grid_thw.device,
+            dtype=video_grid_thw.dtype,
+        )
+        prepared_inputs = dict(model_inputs)
+        prepared_inputs["video_grid_thw"] = expanded_video_grid_thw
+        return prepared_inputs
+
     def _run_standard_generation(
         self,
         model_inputs: dict[str, Any],
     ) -> str:
+        generation_model_inputs = self._prepare_generation_model_inputs(model_inputs)
         with torch.inference_mode():
             output_ids = self.model.generate(
-                **model_inputs,
+                **generation_model_inputs,
                 **self.generation_kwargs,
             )
 
-        input_ids = model_inputs.get("input_ids")
+        input_ids = generation_model_inputs.get("input_ids")
         prompt_length = input_ids.shape[1] if input_ids is not None else 0
         return self._decode_generation_output(output_ids, prompt_length=prompt_length)
 
-    def _supports_layered_video_path(
-        self,
-        model_inputs: dict[str, Any],
-    ) -> bool:
-        if self.backend != "video_llava":
-            return False
+    def _reset_multimodal_state(self) -> None:
+        model_core = getattr(self.model, "model", None)
+        if model_core is not None and hasattr(model_core, "rope_deltas"):
+            model_core.rope_deltas = None
 
-        input_ids = model_inputs.get("input_ids")
-        pixel_values_videos = model_inputs.get("pixel_values_videos")
-        if input_ids is None or pixel_values_videos is None:
-            return False
-
-        return input_ids.shape[0] == 1
-
-    def _extract_visual_token_features(
+    def _extract_video_features(
         self,
         model_inputs: dict[str, Any],
     ) -> tuple[torch.Tensor, dict[str, Any]]:
-        if self.backend != "video_llava":
+        pixel_values_videos = model_inputs.get("pixel_values_videos")
+        video_grid_thw = model_inputs.get("video_grid_thw")
+        if pixel_values_videos is None or video_grid_thw is None:
+            raise ValueError("Video inputs are required for patch selection.")
+
+        if not hasattr(self.model, "get_video_features"):
             raise RuntimeError(
-                f"Layered visual-token path is not implemented for backend `{self.backend}`."
+                f"Backend `{self.backend}` does not expose `get_video_features`."
             )
 
-        video_feature_getter = getattr(self.model, "get_video_features", None)
-        if video_feature_getter is None:
-            video_feature_getter = getattr(getattr(self.model, "model", None), "get_video_features", None)
-        if video_feature_getter is None:
-            raise AttributeError(
-                "This Video-LLaVA implementation does not expose `get_video_features` "
-                "on either the top-level model or its inner `.model`."
-            )
-
-        outputs = video_feature_getter(
-            pixel_values_videos=model_inputs["pixel_values_videos"],
+        outputs = self.model.get_video_features(
+            pixel_values_videos=pixel_values_videos,
+            video_grid_thw=video_grid_thw,
             return_dict=True,
         )
         video_features = outputs.pooler_output
-        if video_features.ndim != 3:
+        if isinstance(video_features, (list, tuple)):
+            if len(video_features) != 1:
+                raise ValueError(
+                    "Patch selection currently expects a single video per prompt."
+                )
+            video_features = video_features[0]
+
+        if video_features.ndim != 2:
             raise ValueError(
-                "Expected video features with shape (T, L, D), "
+                "Expected merged video features with shape (N, D), "
                 f"but got {tuple(video_features.shape)}."
             )
 
         metadata = {
-            "has_cls_token": True,
-            "num_frames": int(video_features.shape[0]),
-            "tokens_per_frame": int(video_features.shape[1]),
+            "video_grid_thw": video_grid_thw[0].detach().cpu().tolist(),
+            "video_token_count": int(video_features.shape[0]),
         }
         return video_features, metadata
 
-    def _call_token_selector(
+    def _call_patch_selector(
         self,
-        token_features: torch.Tensor,
+        video_features: torch.Tensor,
         *,
-        video_tensor: torch.Tensor,
-        prompt: str,
+        prompt: PromptInput,
+        frame_selection: FrameSelectionResult,
         model_inputs: dict[str, Any],
         extraction_metadata: dict[str, Any],
     ) -> Any:
-        if self.token_selector is None:
+        if self.patch_selector is None:
             return None
 
         selector_kwargs = {
-            **self.token_selector_kwargs,
-            "token_features": token_features,
-            "video_tensor": video_tensor,
+            "video_features": video_features,
             "prompt": prompt,
+            "frame_selection": frame_selection,
             "model_inputs": model_inputs,
             "extraction_metadata": extraction_metadata,
             "processor": self.processor,
@@ -514,266 +769,293 @@ class BaseVLM(VLMInterface):
             "backend": self.backend,
         }
 
-        signature = inspect.signature(self.token_selector)
+        signature = inspect.signature(self.patch_selector)
         accepts_var_keyword = any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD
             for parameter in signature.parameters.values()
         )
         if accepts_var_keyword:
-            return self.token_selector(**selector_kwargs)
+            return self.patch_selector(**selector_kwargs)
 
         filtered_kwargs = {
             name: value
             for name, value in selector_kwargs.items()
             if name in signature.parameters
         }
-        return self.token_selector(**filtered_kwargs)
+        return self.patch_selector(**filtered_kwargs)
 
-    def _normalize_token_selection_output(
+    def _coerce_patch_indices(
+        self,
+        indices: torch.Tensor | list[int] | tuple[int, ...],
+        *,
+        device: torch.device,
+        upper_bound: int,
+    ) -> torch.Tensor:
+        tensor = (
+            indices
+            if torch.is_tensor(indices)
+            else torch.tensor(indices, device=device, dtype=torch.long)
+        )
+        tensor = tensor.to(device=device, dtype=torch.long).flatten()
+        if tensor.numel() == 0:
+            raise ValueError("Patch selector returned an empty selection.")
+        if torch.any(tensor < 0) or torch.any(tensor >= upper_bound):
+            raise ValueError(
+                f"Patch selector indices must be within [0, {upper_bound}), got {tensor.tolist()}."
+            )
+        return tensor
+
+    def _normalize_patch_selection_output(
         self,
         selection_output: Any,
-        full_token_features: torch.Tensor,
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor], dict[str, Any]]:
+        full_video_features: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        selected_indices: torch.Tensor | None = None
+        selected_features: torch.Tensor | None = None
+        metadata: dict[str, Any] = {}
+
         if selection_output is None:
-            full_indices = [
-                torch.arange(
-                    full_token_features.shape[1],
-                    device=full_token_features.device,
-                    dtype=torch.long,
-                )
-                for _ in range(full_token_features.shape[0])
-            ]
-            full_tokens = [
-                full_token_features[frame_idx]
-                for frame_idx in range(full_token_features.shape[0])
-            ]
-            return full_indices, full_tokens, {}
+            selected_indices = torch.arange(
+                full_video_features.shape[0],
+                device=full_video_features.device,
+                dtype=torch.long,
+            )
+            selected_features = full_video_features
+            return selected_indices, selected_features, metadata
 
-        if isinstance(selection_output, dict):
+        if isinstance(selection_output, PatchSelectionResult):
+            selected_indices = selection_output.selected_indices
+            selected_features = selection_output.selected_features
+            metadata = dict(selection_output.metadata)
+        elif isinstance(selection_output, dict):
             selected_indices = selection_output.get("selected_indices")
-            selected_tokens = selection_output.get("selected_tokens")
-
-            if selected_indices is None and selected_tokens is None:
+            selected_features = selection_output.get("selected_features")
+            metadata = {
+                key: value
+                for key, value in selection_output.items()
+                if key not in {"selected_indices", "selected_features"}
+            }
+        elif torch.is_tensor(selection_output):
+            if selection_output.ndim == 1:
+                selected_indices = selection_output
+            elif selection_output.ndim == 2:
+                selected_features = selection_output
+            else:
                 raise ValueError(
-                    "Token selector output dict must include `selected_indices` "
-                    "or `selected_tokens`."
+                    "Tensor patch selector output must be 1D indices or 2D features."
                 )
-
-            if selected_indices is None:
-                selected_indices = [
-                    torch.arange(
-                        frame_tokens.shape[0],
-                        device=frame_tokens.device,
-                        dtype=torch.long,
-                    )
-                    for frame_tokens in selected_tokens
-                ]
-                warnings.warn(
-                    "Token selector output did not include `selected_indices`; "
-                    "falling back to the first k token positions per frame.",
-                    stacklevel=2,
-                )
-
-            if selected_tokens is None:
-                selected_tokens = [
-                    full_token_features[frame_idx, frame_indices]
-                    for frame_idx, frame_indices in enumerate(selected_indices)
-                ]
-
-            return selected_indices, selected_tokens, dict(selection_output)
-
-        if torch.is_tensor(selection_output):
-            if selection_output.ndim != 3:
-                raise ValueError(
-                    "Tensor token selector output must have shape (T, K, D), "
-                    f"but got {tuple(selection_output.shape)}."
-                )
-            selected_tokens = [
-                selection_output[frame_idx]
-                for frame_idx in range(selection_output.shape[0])
-            ]
-            selected_indices = [
-                torch.arange(
-                    frame_tokens.shape[0],
-                    device=frame_tokens.device,
-                    dtype=torch.long,
-                )
-                for frame_tokens in selected_tokens
-            ]
-            warnings.warn(
-                "Tensor token selector output did not include source indices; "
-                "falling back to the first k token positions per frame.",
-                stacklevel=2,
-            )
-            return selected_indices, selected_tokens, {}
-
-        if isinstance(selection_output, list) and all(
-            torch.is_tensor(item) for item in selection_output
+        elif isinstance(selection_output, (list, tuple)) and selection_output and all(
+            isinstance(item, int) for item in selection_output
         ):
-            selected_tokens = selection_output
-            selected_indices = [
-                torch.arange(
-                    frame_tokens.shape[0],
-                    device=frame_tokens.device,
-                    dtype=torch.long,
-                )
-                for frame_tokens in selected_tokens
-            ]
-            warnings.warn(
-                "List token selector output did not include source indices; "
-                "falling back to the first k token positions per frame.",
-                stacklevel=2,
+            selected_indices = torch.tensor(
+                selection_output,
+                device=full_video_features.device,
+                dtype=torch.long,
             )
-            return selected_indices, selected_tokens, {}
+        else:
+            raise TypeError(
+                "Unsupported patch selector output type. Expected None, PatchSelectionResult, dict, Tensor, or list[int]."
+            )
 
-        raise TypeError(
-            "Unsupported token selector output type. Expected dict, Tensor, or list[Tensor]."
-        )
+        if selected_indices is None and selected_features is None:
+            raise ValueError(
+                "Patch selector must return `selected_indices`, `selected_features`, or both."
+            )
 
-    def _select_visual_tokens(
+        if selected_indices is not None:
+            selected_indices = self._coerce_patch_indices(
+                selected_indices,
+                device=full_video_features.device,
+                upper_bound=full_video_features.shape[0],
+            )
+
+        if selected_features is None:
+            selected_features = full_video_features[selected_indices]
+        else:
+            selected_features = selected_features.to(
+                device=full_video_features.device,
+                dtype=full_video_features.dtype,
+            )
+
+        if selected_indices is None:
+            selected_indices = torch.arange(
+                selected_features.shape[0],
+                device=full_video_features.device,
+                dtype=torch.long,
+            )
+
+        if selected_features.ndim != 2:
+            raise ValueError(
+                "Selected video features must have shape (N, D), "
+                f"but got {tuple(selected_features.shape)}."
+            )
+        if selected_indices.numel() != selected_features.shape[0]:
+            raise ValueError(
+                "Patch selector returned mismatched indices/features: "
+                f"indices={selected_indices.numel()}, features={selected_features.shape[0]}."
+            )
+
+        return selected_indices, selected_features, metadata
+
+    def _derive_mm_token_type_ids(
         self,
-        token_features: torch.Tensor,
-        *,
-        video_tensor: torch.Tensor,
-        prompt: str,
+        input_ids: torch.Tensor,
+        existing_ids: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if existing_ids is not None:
+            return existing_ids
+
+        mm_token_type_ids = torch.zeros_like(input_ids)
+        image_token_id = getattr(self.model.config, "image_token_id", None)
+        video_token_id = getattr(self.model.config, "video_token_id", None)
+        if image_token_id is not None:
+            mm_token_type_ids[input_ids == int(image_token_id)] = 1
+        if video_token_id is not None:
+            mm_token_type_ids[input_ids == int(video_token_id)] = 2
+        return mm_token_type_ids
+
+    def _compute_full_position_ids(
+        self,
         model_inputs: dict[str, Any],
-        extraction_metadata: dict[str, Any],
-    ) -> tuple[list[torch.Tensor], list[torch.Tensor], dict[str, Any]]:
-        selection_output = self._call_token_selector(
-            token_features=token_features,
-            video_tensor=video_tensor,
-            prompt=prompt,
-            model_inputs=model_inputs,
-            extraction_metadata=extraction_metadata,
+    ) -> torch.Tensor:
+        model_core = getattr(self.model, "model", None)
+        if model_core is None or not hasattr(model_core, "compute_3d_position_ids"):
+            raise RuntimeError(
+                f"Backend `{self.backend}` does not expose multimodal position-id computation."
+            )
+
+        input_ids = model_inputs.get("input_ids")
+        attention_mask = model_inputs.get("attention_mask")
+        if input_ids is None or attention_mask is None:
+            raise ValueError(
+                "`input_ids` and `attention_mask` are required for patch selection."
+            )
+
+        mm_token_type_ids = self._derive_mm_token_type_ids(
+            input_ids=input_ids,
+            existing_ids=model_inputs.get("mm_token_type_ids"),
         )
-        return self._normalize_token_selection_output(
-            selection_output=selection_output,
-            full_token_features=token_features,
+        inputs_embeds = self.model.get_input_embeddings()(input_ids)
+        model_core.rope_deltas = None
+        position_ids = model_core.compute_3d_position_ids(
+            input_ids=input_ids,
+            image_grid_thw=model_inputs.get("image_grid_thw"),
+            video_grid_thw=model_inputs.get("video_grid_thw"),
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=None,
+            second_per_grid_ts=model_inputs.get("second_per_grid_ts"),
+            mm_token_type_ids=mm_token_type_ids,
         )
+        if position_ids is None:
+            raise RuntimeError("Failed to compute multimodal position ids for patch selection.")
+        return position_ids
 
-    def _project_visual_tokens(
-        self,
-        selected_tokens: list[torch.Tensor],
-        extraction_metadata: dict[str, Any],
-    ) -> list[torch.Tensor]:
-        _ = extraction_metadata
-        return selected_tokens
-
-    def _get_video_token_id(self) -> int | None:
-        for attr_name in ("video_token_index", "video_token_id"):
-            value = getattr(self.model.config, attr_name, None)
-            if value is not None:
-                return int(value)
-        return None
-
-    def _build_generation_inputs_from_selected_tokens(
+    def _build_generation_inputs_from_patch_selection(
         self,
         model_inputs: dict[str, Any],
-        full_token_features: torch.Tensor,
-        selected_indices: list[torch.Tensor],
-        projected_tokens: list[torch.Tensor],
+        full_video_features: torch.Tensor,
+        selected_indices: torch.Tensor,
+        selected_features: torch.Tensor,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         input_ids = model_inputs.get("input_ids")
-        if input_ids is None:
-            raise ValueError("`input_ids` is required to rebuild pruned multimodal inputs.")
-
         attention_mask = model_inputs.get("attention_mask")
+        if input_ids is None:
+            raise ValueError("`input_ids` is required for patch selection.")
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
 
-        video_token_id = self._get_video_token_id()
+        mm_token_type_ids = self._derive_mm_token_type_ids(
+            input_ids=input_ids,
+            existing_ids=model_inputs.get("mm_token_type_ids"),
+        )
+        position_ids = self._compute_full_position_ids(
+            {**model_inputs, "mm_token_type_ids": mm_token_type_ids}
+        )
+
+        video_token_id = getattr(self.model.config, "video_token_id", None)
         if video_token_id is None:
             raise ValueError("Could not find the video placeholder token id from the model config.")
 
         video_positions = torch.nonzero(
-            input_ids[0] == video_token_id,
+            input_ids[0] == int(video_token_id),
             as_tuple=False,
         ).flatten()
-
-        num_frames, tokens_per_frame, _ = full_token_features.shape
-        expected_video_tokens = num_frames * tokens_per_frame
-        if int(video_positions.numel()) != expected_video_tokens:
+        if int(video_positions.numel()) != int(full_video_features.shape[0]):
             raise ValueError(
-                "Video placeholder count does not match extracted token count: "
-                f"tokens={int(video_positions.numel())}, features={expected_video_tokens}."
+                "Video placeholder count does not match merged video feature count: "
+                f"tokens={int(video_positions.numel())}, features={int(full_video_features.shape[0])}."
             )
 
-        frame_positions = video_positions.view(num_frames, tokens_per_frame)
-        kept_positions = []
-        flattened_tokens = []
-        keep_counts = []
-        for frame_idx, frame_indices in enumerate(selected_indices):
-            frame_indices = frame_indices.to(device=frame_positions.device, dtype=torch.long)
-            kept_positions.append(frame_positions[frame_idx, frame_indices])
-            frame_tokens = projected_tokens[frame_idx].to(
-                device=full_token_features.device,
-                dtype=full_token_features.dtype,
-            )
-            flattened_tokens.append(frame_tokens)
-            keep_counts.append(int(frame_tokens.shape[0]))
-
+        kept_positions = video_positions[selected_indices]
         keep_mask = torch.ones(
             input_ids.shape[1],
             dtype=torch.bool,
             device=input_ids.device,
         )
         keep_mask[video_positions] = False
-        keep_mask[torch.cat(kept_positions, dim=0)] = True
+        keep_mask[kept_positions] = True
 
         pruned_input_ids = input_ids[:, keep_mask]
         pruned_attention_mask = attention_mask[:, keep_mask]
+        pruned_mm_token_type_ids = mm_token_type_ids[:, keep_mask]
+        pruned_position_ids = position_ids[:, :, keep_mask]
         pruned_inputs_embeds = self.model.get_input_embeddings()(pruned_input_ids)
 
-        video_mask = pruned_input_ids[0] == video_token_id
-        pruned_video_tokens = torch.cat(flattened_tokens, dim=0).to(
+        pruned_video_mask = pruned_input_ids[0] == int(video_token_id)
+        pruned_video_features = selected_features.to(
             device=pruned_inputs_embeds.device,
             dtype=pruned_inputs_embeds.dtype,
         )
-        if int(video_mask.sum().item()) != pruned_video_tokens.shape[0]:
+        if int(pruned_video_mask.sum().item()) != int(pruned_video_features.shape[0]):
             raise ValueError(
-                "Pruned video placeholder count does not match selected token count: "
-                f"tokens={int(video_mask.sum().item())}, "
-                f"features={pruned_video_tokens.shape[0]}."
+                "Pruned video placeholder count does not match selected feature count: "
+                f"tokens={int(pruned_video_mask.sum().item())}, "
+                f"features={int(pruned_video_features.shape[0])}."
             )
 
-        pruned_inputs_embeds[0, video_mask] = pruned_video_tokens
+        pruned_inputs_embeds[0, pruned_video_mask] = pruned_video_features
         generation_inputs = {
+            "input_ids": pruned_input_ids,
             "inputs_embeds": pruned_inputs_embeds,
             "attention_mask": pruned_attention_mask,
+            "position_ids": pruned_position_ids,
+            "mm_token_type_ids": pruned_mm_token_type_ids,
         }
         metadata = {
-            "original_video_tokens": expected_video_tokens,
-            "selected_video_tokens": int(pruned_video_tokens.shape[0]),
-            "keep_counts": keep_counts,
+            "original_video_tokens": int(full_video_features.shape[0]),
+            "selected_video_tokens": int(pruned_video_features.shape[0]),
             "input_length_before": int(input_ids.shape[1]),
             "input_length_after": int(pruned_input_ids.shape[1]),
         }
         return generation_inputs, metadata
 
-    def _run_layered_video_path(
+    def _run_patch_selection_generation(
         self,
-        model_inputs: dict[str, Any],
         *,
-        video_tensor: torch.Tensor,
-        prompt: str,
+        prompt: PromptInput,
+        frame_selection: FrameSelectionResult,
+        model_inputs: dict[str, Any],
     ) -> str:
-        token_features, extraction_metadata = self._extract_visual_token_features(model_inputs)
-        selected_indices, selected_tokens, selector_metadata = self._select_visual_tokens(
-            token_features=token_features,
-            video_tensor=video_tensor,
+        full_video_features, extraction_metadata = self._extract_video_features(model_inputs)
+        selection_output = self._call_patch_selector(
+            video_features=full_video_features,
             prompt=prompt,
+            frame_selection=frame_selection,
             model_inputs=model_inputs,
             extraction_metadata=extraction_metadata,
         )
-        projected_tokens = self._project_visual_tokens(
-            selected_tokens=selected_tokens,
-            extraction_metadata=extraction_metadata,
+        selected_indices, selected_features, selector_metadata = (
+            self._normalize_patch_selection_output(
+                selection_output=selection_output,
+                full_video_features=full_video_features,
+            )
         )
-        generation_inputs, pruning_metadata = self._build_generation_inputs_from_selected_tokens(
+        generation_inputs, pruning_metadata = self._build_generation_inputs_from_patch_selection(
             model_inputs=model_inputs,
-            full_token_features=token_features,
+            full_video_features=full_video_features,
             selected_indices=selected_indices,
-            projected_tokens=projected_tokens,
+            selected_features=selected_features,
         )
 
         with torch.inference_mode():
@@ -782,59 +1064,52 @@ class BaseVLM(VLMInterface):
                 **self.generation_kwargs,
             )
 
-        prompt_length = generation_inputs["attention_mask"].shape[1]
-        self.last_token_selection_info = {
+        prompt_length = generation_inputs["input_ids"].shape[1]
+        self.last_patch_selection_info = {
             "applied": True,
             "backend": self.backend,
+            **extraction_metadata,
             **pruning_metadata,
-            "selector_output_keys": (
-                sorted(selector_metadata.keys())
-                if isinstance(selector_metadata, dict)
-                else None
-            ),
+            "selector_output_keys": sorted(selector_metadata.keys()),
         }
         return self._decode_generation_output(output_ids, prompt_length=prompt_length)
 
     def answer(
         self,
         video_path: str,
-        prompt: str,
+        prompt: PromptInput,
         **frame_selector_kwargs: Any,
     ) -> str:
         selector_kwargs = {
             **self.frame_selector_kwargs,
             **frame_selector_kwargs,
         }
-        video_tensor = self.frame_selector(video_path=video_path, **selector_kwargs)
-        prompt = self._prepare_prompt(prompt, has_video=video_tensor is not None)
-        model_inputs = self._build_model_inputs(prompt=prompt, video_tensor=video_tensor)
+        frame_selection = self._normalize_frame_selection_output(
+            self.frame_selector(video_path=video_path, **selector_kwargs),
+            video_path=video_path,
+        )
+        video_tensor = frame_selection.frames
+        prompt_text = self._prepare_text_input(
+            prompt,
+            has_video=video_tensor is not None,
+        )
+        self._reset_multimodal_state()
+        model_inputs = self._build_model_inputs(
+            prompt_text=prompt_text,
+            video_tensor=video_tensor,
+            frame_selection=frame_selection,
+        )
 
-        if video_tensor is not None and self._supports_layered_video_path(model_inputs):
-            try:
-                return self._run_layered_video_path(
-                    model_inputs=model_inputs,
-                    video_tensor=video_tensor,
-                    prompt=prompt,
-                )
-            except Exception as exc:
-                self.last_token_selection_info = {
-                    "applied": False,
-                    "backend": self.backend,
-                    "reason": str(exc),
-                }
-                if not self.fallback_to_standard_path:
-                    raise
+        if self.patch_selector is not None and video_tensor is not None:
+            return self._run_patch_selection_generation(
+                prompt=prompt,
+                frame_selection=frame_selection,
+                model_inputs=model_inputs,
+            )
 
-                warnings.warn(
-                    f"Layered visual-token path failed and standard generation will be used: {exc}",
-                    stacklevel=2,
-                )
-
-        else:
-            self.last_token_selection_info = {
-                "applied": False,
-                "backend": self.backend,
-                "reason": "layered_path_not_supported",
-            }
-
+        self.last_patch_selection_info = {
+            "applied": False,
+            "backend": self.backend,
+            "reason": "patch_selector_not_configured",
+        }
         return self._run_standard_generation(model_inputs)

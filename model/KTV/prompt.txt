@@ -1,7 +1,0 @@
-[SYSTEM]
-Chat between a human and an artificial intelligence video analyst.
-
-Describe what you see in the video
-
-[USER]
-Is there {query} in Video? 
