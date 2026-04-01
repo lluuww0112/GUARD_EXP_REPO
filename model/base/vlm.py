@@ -1,4 +1,5 @@
 import inspect
+import importlib.util
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable
@@ -11,13 +12,14 @@ from transformers import (
     AutoConfig,
     AutoModelForImageTextToText,
     AutoProcessor,
+    BitsAndBytesConfig,
     GenerationMixin,
-    LlavaNextForConditionalGeneration,
-    LlavaNextProcessor,
     PreTrainedModel,
     ProcessorMixin,
     Qwen2VLForConditionalGeneration,
     Qwen2VLProcessor,
+    Qwen2_5_VLForConditionalGeneration,
+    Qwen3VLForConditionalGeneration,
     VideoLlavaForConditionalGeneration,
     VideoLlavaProcessor,
 )
@@ -33,9 +35,17 @@ DTYPE_MAP = {
     "fp32": torch.float32,
 }
 
+QUANTIZED_DTYPE_KEYS = ("bnb_4bit_compute_dtype", "bnb_4bit_quant_storage")
+DEFAULT_VISION_SKIP_MODULES = (
+    "vision_tower",
+    "vision_model",
+    "visual",
+    "image_tower",
+    "video_tower",
+)
+
 BACKEND_MODEL_TYPE_HINTS = {
     "video_llava": {"video_llava"},
-    "llava_next": {"llava_next"},
     "qwen2_vl": {"qwen2_vl", "qwen2_5_vl"},
 }
 
@@ -67,13 +77,17 @@ VLM_BACKENDS = {
         "processor_cls": VideoLlavaProcessor,
         "model_cls": VideoLlavaForConditionalGeneration,
     },
-    "llava_next": {
-        "processor_cls": LlavaNextProcessor,
-        "model_cls": LlavaNextForConditionalGeneration,
-    },
     "qwen2_vl": {
         "processor_cls": Qwen2VLProcessor,
         "model_cls": Qwen2VLForConditionalGeneration,
+    },
+    "qwen2_5_vl":{
+        "processor_cls": AutoProcessor,
+        "model_cls": Qwen2_5_VLForConditionalGeneration,
+    },
+    "qwen3_vl":{
+        "processor_cls": AutoProcessor,
+        "model_cls": Qwen3VLForConditionalGeneration,
     },
     "auto": {
         "processor_cls": AutoProcessor,
@@ -111,6 +125,7 @@ class BaseVLM(VLMInterface):
         model_kwargs: dict[str, Any] | None = None,
         generation_kwargs: dict[str, Any] | None = None,
         dtype: str | torch.dtype | None = None,
+        quantization: dict[str, Any] | None = None,
         token_selector_kwargs: dict[str, Any] | None = None,
         fallback_to_standard_path: bool = True,
         local_model_dir: str | None = None,
@@ -128,10 +143,11 @@ class BaseVLM(VLMInterface):
         self.backend = backend
         self.processor_cls = backend_config["processor_cls"]
         self.model_cls = backend_config["model_cls"]
-        self.processor_kwargs = processor_kwargs or {}
-        self.model_kwargs = model_kwargs or {}
+        self.processor_kwargs = dict(processor_kwargs or {})
+        self.model_kwargs = dict(model_kwargs or {})
         self.generation_kwargs = dict(generation_kwargs or {})
         self.dtype = DTYPE_MAP[dtype] if isinstance(dtype, str) else dtype
+        self.quantization = dict(quantization or {})
         self.token_selector_kwargs = dict(token_selector_kwargs or {})
         self.fallback_to_standard_path = fallback_to_standard_path
         self.local_model_dir = (
@@ -157,16 +173,21 @@ class BaseVLM(VLMInterface):
         dtype = self.dtype or (torch.float16 if use_cuda else torch.float32)
         model_source = self._resolve_model_source(model_id)
         self._validate_backend_model_type(model_source)
+        quantization_kwargs = self._build_quantization_kwargs(use_cuda=use_cuda)
 
         processor = self.processor_cls.from_pretrained(
             model_source,
             **self.processor_kwargs,
         )
+        model_loading_kwargs = {
+            "torch_dtype": dtype,
+            "device_map": "auto" if use_cuda else None,
+            **quantization_kwargs,
+            **self.model_kwargs,
+        }
         model = self.model_cls.from_pretrained(
             model_source,
-            torch_dtype=dtype,
-            device_map="auto" if use_cuda else None,
-            **self.model_kwargs,
+            **model_loading_kwargs,
         )
 
         if not use_cuda:
@@ -174,6 +195,60 @@ class BaseVLM(VLMInterface):
 
         model.eval()
         return processor, model
+
+    def _resolve_dtype(self, dtype_value: Any) -> Any:
+        if isinstance(dtype_value, str):
+            return DTYPE_MAP.get(dtype_value.lower(), dtype_value)
+        return dtype_value
+
+    def _build_quantization_kwargs(
+        self,
+        *,
+        use_cuda: bool,
+    ) -> dict[str, Any]:
+        if not self.quantization:
+            return {}
+        if not bool(self.quantization.get("enabled", False)):
+            return {}
+        if "quantization_config" in self.model_kwargs:
+            raise ValueError(
+                "Do not set both `vlm.quantization` and `vlm.model_kwargs.quantization_config`."
+            )
+
+        if not use_cuda:
+            raise RuntimeError(
+                "Quantization requires CUDA in this project. "
+                "Disable `vlm.quantization.enabled` when running on CPU."
+            )
+        if importlib.util.find_spec("bitsandbytes") is None:
+            raise ImportError(
+                "`bitsandbytes` is required for quantization. "
+                "Install it and retry."
+            )
+
+        mode = str(self.quantization.get("mode", "")).lower().strip()
+        if mode not in {"4bit", "8bit"}:
+            raise ValueError("`vlm.quantization.mode` must be one of: `4bit`, `8bit`.")
+
+        bnb_kwargs = dict(self.quantization.get("kwargs") or {})
+        for key in QUANTIZED_DTYPE_KEYS:
+            if key in bnb_kwargs:
+                bnb_kwargs[key] = self._resolve_dtype(bnb_kwargs[key])
+
+        skip_modules = list(self.quantization.get("skip_modules") or [])
+        existing_skip_modules = bnb_kwargs.get("llm_int8_skip_modules") or []
+        if isinstance(existing_skip_modules, (list, tuple)):
+            skip_modules.extend(existing_skip_modules)
+        skip_vision_encoder = bool(self.quantization.get("skip_vision_encoder", True))
+        if skip_vision_encoder:
+            skip_modules = [*skip_modules, *DEFAULT_VISION_SKIP_MODULES]
+        if skip_modules:
+            bnb_kwargs["llm_int8_skip_modules"] = sorted(set(skip_modules))
+
+        bnb_kwargs["load_in_4bit"] = mode == "4bit"
+        bnb_kwargs["load_in_8bit"] = mode == "8bit"
+        quantization_config = BitsAndBytesConfig(**bnb_kwargs)
+        return {"quantization_config": quantization_config}
 
     def _extract_snapshot_download_kwargs(self) -> dict[str, Any]:
         download_kwargs: dict[str, Any] = {}
@@ -284,7 +359,6 @@ class BaseVLM(VLMInterface):
         try:
             config = AutoConfig.from_pretrained(model_id, **config_kwargs)
         except Exception:
-            # If config probing fails, defer to the original model loading error path.
             return
 
         model_type = str(getattr(config, "model_type", "")).lower()

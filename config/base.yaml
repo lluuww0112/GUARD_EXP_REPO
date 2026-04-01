@@ -21,9 +21,20 @@ token_selection: null
 
 vlm:
   _target_: model.base.BaseVLM
-  model_id: "Qwen/Qwen2.5-VL-7B-Instruct"
-  backend: "qwen2_vl" # VLM마다 상속하는 인터페이스가 달라서 달라 미리 정의해둔 인터페이스 집합. 자세한 코드는 vlm.py를 참고
+  model_id: "Qwen/Qwen3-VL-8B-Instruct"
+  backend: "qwen3_vl" # VLM마다 상속하는 인터페이스가 달라서 달라 미리 정의해둔 인터페이스 집합. 자세한 코드는 vlm.py를 참고
   dtype: "bf16" # Enum[ bf16 | fp16 | fp32 ]
+  quantization:
+    enabled: false # true면 bitsandbytes 양자화 활성화 (CUDA 필요)
+    mode: "4bit" # 4bit는 메모리 절감, 8bit는 정확도/안정성에 더 유리한 편
+    skip_vision_encoder: true # vision encoder는 성능 저하 방지를 위해 기본적으로 제외
+    skip_modules: [] # 추가 제외 모듈명 리스트 (예: ["multi_modal_projector"])
+    kwargs: # BitsAndBytesConfig로 그대로 전달되는 세부 옵션
+      bnb_4bit_compute_dtype: "bf16" # 4bit 연산 시 내부 계산 dtype
+      bnb_4bit_quant_type: "nf4" # 4bit quant 타입 (nf4/fp4)
+      bnb_4bit_use_double_quant: true # 2중 양자화로 메모리 추가 절약
+      llm_int8_threshold: 6.0 # 8bit 모드에서 outlier 처리 임계값
+      llm_int8_enable_fp32_cpu_offload: false # 8bit 모드에서 CPU fp32 오프로딩 사용 여부
   frame_selector: ${frame_selection}
   token_selector: ${token_selection}
   processor_kwargs: {} # 전처리기 로드시 .from_pretrained() 옵션 설정
