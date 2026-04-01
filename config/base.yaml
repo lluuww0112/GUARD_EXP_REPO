@@ -1,17 +1,28 @@
+defaults:
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
+hydra:
+  job:
+    chdir: false
+  output_subdir: null
+  run:
+    dir: .
+
 # 프레임 셀렉션 함수 설정, 함수를 정의한 다음 옵션을 여기서 자유롭게 정의 가능, 
 # 필수인자로 video_path를 받도록 구현해야 함
 frame_selection: 
   _target_: model.base.uniform_sampling
   _partial_: true
   num_frames: 10
-  max_side: 720
+  max_side: 224
 
 token_selection: null
 
 vlm:
   _target_: model.base.BaseVLM
-  model_id: "LanguageBind/Video-LLaVA-7B-hf"
-  backend: "video_llava" # VLM마다 상속하는 인터페이스가 달라서 달라 미리 정의해둔 인터페이스 집합. 자세한 코드는 vlm.py를 참고
+  model_id: "Qwen/Qwen2.5-VL-7B-Instruct"
+  backend: "qwen2_vl" # VLM마다 상속하는 인터페이스가 달라서 달라 미리 정의해둔 인터페이스 집합. 자세한 코드는 vlm.py를 참고
   dtype: "bf16" # Enum[ bf16 | fp16 | fp32 ]
   frame_selector: ${frame_selection}
   token_selector: ${token_selection}
@@ -19,9 +30,9 @@ vlm:
   model_kwargs: {}  # 모델 로드시 .from_pretrained() 옵션 설정
   token_selector_kwargs: {}
   fallback_to_standard_path: true
+  local_model_dir: "./model/repo"
   generation_kwargs: # 생성시점 옵션, 출력 샘플링 / 온도 설정 / top_p등 설정 가능
     do_sample: true
-    top_p: 0.9
     max_new_tokens: 256
 
 invoke: 
@@ -29,4 +40,4 @@ invoke:
   prompt_file: "model/base/prompt.txt"
   query_file: "model/base/query.txt"
   print_config: false # 현재 yaml 파일 내용 출력 여부
-  quiet_model_loading: true # Hugging Face/transformers 모델 로딩 로그 및 progress bar 숨김
+  quiet_model_loading: false # Hugging Face/transformers 모델 로딩 로그 및 progress bar 숨김

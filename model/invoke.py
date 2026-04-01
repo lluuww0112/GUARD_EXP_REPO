@@ -138,6 +138,7 @@ def summarize_config(config: DictConfig) -> dict[str, Any]:
         "model_id": config.vlm.get("model_id"),
         "backend": config.vlm.get("backend"),
         "dtype": config.vlm.get("dtype"),
+        "local_model_dir": config.vlm.get("local_model_dir"),
         "generation_kwargs": generation_kwargs,
     }
 
@@ -173,6 +174,11 @@ def main(config: DictConfig) -> None:
     print(f"Model       : {summary['model_id']}")
     print(f"Backend     : {summary['backend']}")
     print(f"DType       : {summary['dtype']}")
+    if summary.get("local_model_dir") is not None:
+        print(f"Local Store : {summary['local_model_dir']}")
+    resolved_model_source = getattr(vlm, "resolved_model_source", None)
+    if resolved_model_source and str(resolved_model_source) != str(summary["model_id"]):
+        print(f"Load Source : {resolved_model_source}")
     print(f"Selection   : {summary['frame_selection']['_target_']}")
     print(f"Prompt File : {summary['invoke']['prompt_file']}")
     print(f"Query File  : {summary['invoke']['query_file']}")

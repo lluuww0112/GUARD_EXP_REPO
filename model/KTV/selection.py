@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
+from huggingface_hub import snapshot_download
 from sklearn.cluster import KMeans
 from threadpoolctl import threadpool_limits
 from transformers import AutoImageProcessor, AutoModel, AutoProcessor
@@ -24,6 +25,52 @@ DINOV2_DTYPE_MAP = {
     "fp16": torch.float16,
     "fp32": torch.float32,
 }
+
+
+def _sanitize_model_id_for_path(model_id: str) -> str:
+    safe = model_id.replace("\\", "/").strip()
+    safe = safe.replace("/", "__").replace(":", "_").replace("@", "_")
+    return "".join(
+        char if (char.isalnum() or char in {"-", "_", "."}) else "_"
+        for char in safe
+    )
+
+
+def _resolve_model_source(
+    *,
+    model_id: str,
+    local_model_dir: str | None = None,
+    local_files_only: bool = False,
+) -> str:
+    model_path = Path(model_id).expanduser()
+    if model_path.exists():
+        return str(model_path.resolve())
+
+    if local_model_dir is None:
+        return model_id
+
+    local_root = Path(local_model_dir).expanduser()
+    local_model_path = local_root / _sanitize_model_id_for_path(model_id)
+    if (local_model_path / "config.json").exists():
+        return str(local_model_path)
+
+    try:
+        local_model_path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot_download(
+            repo_id=model_id,
+            local_dir=str(local_model_path),
+            local_files_only=local_files_only,
+        )
+        if (local_model_path / "config.json").exists():
+            return str(local_model_path)
+    except Exception as exc:
+        warnings.warn(
+            "Failed to mirror auxiliary model into local_model_dir; "
+            f"falling back to default Hugging Face loading path. reason={exc}",
+            stacklevel=2,
+        )
+
+    return model_id
 
 
 def _resolve_torch_dtype(dtype: str | torch.dtype | None) -> torch.dtype | None:
@@ -110,13 +157,19 @@ def _load_dinov2(
     model_id: str,
     local_files_only: bool,
     dtype: torch.dtype | None = None,
+    local_model_dir: str | None = None,
 ):
+    model_source = _resolve_model_source(
+        model_id=model_id,
+        local_model_dir=local_model_dir,
+        local_files_only=local_files_only,
+    )
     processor = AutoImageProcessor.from_pretrained(
-        model_id,
+        model_source,
         local_files_only=local_files_only,
     )
     model = AutoModel.from_pretrained(
-        model_id,
+        model_source,
         local_files_only=local_files_only,
         torch_dtype=dtype,
     )
@@ -142,14 +195,21 @@ def _preload_dinov2_on_import() -> None:
 @lru_cache(maxsize=2)
 def _load_clip(
     model_id: str,
+    local_files_only: bool = False,
+    local_model_dir: str | None = None,
 ):
+    model_source = _resolve_model_source(
+        model_id=model_id,
+        local_model_dir=local_model_dir,
+        local_files_only=local_files_only,
+    )
     processor = AutoProcessor.from_pretrained(
-        model_id,
-        local_files_only=False,
+        model_source,
+        local_files_only=local_files_only,
     )
     model = AutoModel.from_pretrained(
-        model_id,
-        local_files_only=False,
+        model_source,
+        local_files_only=local_files_only,
     )
     model.eval()
 
@@ -166,6 +226,7 @@ def preload_dinov2_model(
     *,
     local_files_only: bool = False,
     dtype: str | torch.dtype | None = None,
+    local_model_dir: str | None = None,
 ) -> None:
     """DINOv2 모델을 캐시에 미리 로드한다."""
     model_dtype = _resolve_torch_dtype(dtype)
@@ -173,14 +234,22 @@ def preload_dinov2_model(
         model_id=model_id,
         local_files_only=local_files_only,
         dtype=model_dtype,
+        local_model_dir=local_model_dir,
     )
 
 
 def preload_clip_model(
     model_id: str = DEFAULT_CLIP_MODEL_ID,
+    *,
+    local_files_only: bool = False,
+    local_model_dir: str | None = None,
 ) -> None:
     """CLIP 모델을 캐시에 미리 로드한다."""
-    _load_clip(model_id=model_id)
+    _load_clip(
+        model_id=model_id,
+        local_files_only=local_files_only,
+        local_model_dir=local_model_dir,
+    )
 
 
 def _move_inputs_to_device(
@@ -305,6 +374,8 @@ def _compute_clip_frame_relevance(
     video_tensor: torch.Tensor,
     query_text: str,
     model_id: str = DEFAULT_CLIP_MODEL_ID,
+    local_files_only: bool = False,
+    local_model_dir: str | None = None,
     dtype: str | torch.dtype | None = None,
     device: str | torch.device | None = None,
     batch_size: int = 16,
@@ -321,6 +392,8 @@ def _compute_clip_frame_relevance(
 
     processor, model = _load_clip(
         model_id=model_id,
+        local_files_only=local_files_only,
+        local_model_dir=local_model_dir,
     )
     if model_dtype is not None:
         model = model.to(device=target_device, dtype=model_dtype)
@@ -383,6 +456,7 @@ def _extract_frame_features(
     device: torch.device,
     local_files_only: bool,
     dtype: str | torch.dtype | None = None,
+    local_model_dir: str | None = None,
 ) -> torch.Tensor:
     if batch_size <= 0:
         raise ValueError(f"batch_size must be >= 1, but got {batch_size}.")
@@ -392,6 +466,7 @@ def _extract_frame_features(
         model_id=model_id,
         local_files_only=local_files_only,
         dtype=model_dtype,
+        local_model_dir=local_model_dir,
     )
     model = model.to(device=device, dtype=model_dtype)
 
@@ -623,6 +698,7 @@ def dinov2_kmeans_keyframe_selection(
     random_state: int = 0,
     num_threads: int | None = None,
     local_files_only: bool = False,
+    local_model_dir: str | None = None,
 ) -> torch.Tensor:
     """KTV 논문 방식의 DINOv2 + KMeans keyframe selection.
 
@@ -648,6 +724,7 @@ def dinov2_kmeans_keyframe_selection(
         device=target_device,
         local_files_only=local_files_only,
         dtype=dtype,
+        local_model_dir=local_model_dir,
     )
 
     selected_indices = _select_representative_indices(
@@ -673,6 +750,7 @@ def remove_duplicate_frames(
     random_state: int = 0,
     num_threads: int | None = None,
     local_files_only: bool = False,
+    local_model_dir: str | None = None,
 ) -> torch.Tensor:
     """중복 프레임을 줄이기 위한 DINOv2 기반 keyframe selector."""
     return dinov2_kmeans_keyframe_selection(
@@ -688,6 +766,7 @@ def remove_duplicate_frames(
         random_state=random_state,
         num_threads=num_threads,
         local_files_only=local_files_only,
+        local_model_dir=local_model_dir,
     )
 
 
@@ -854,6 +933,8 @@ def query_conditioned_key_patch_selection(
     video_tensor: torch.Tensor | None = None,
     use_prompt_as_query: bool = False,
     clip_model_id: str = DEFAULT_CLIP_MODEL_ID,
+    clip_local_files_only: bool = False,
+    local_model_dir: str | None = None,
     clip_dtype: str | torch.dtype | None = None,
     clip_device: str | torch.device | None = None,
     clip_batch_size: int = 16,
@@ -883,6 +964,8 @@ def query_conditioned_key_patch_selection(
                 video_tensor=video_tensor,
                 query_text=query_text,
                 model_id=clip_model_id,
+                local_files_only=clip_local_files_only,
+                local_model_dir=local_model_dir,
                 dtype=clip_dtype,
                 device=clip_device,
                 batch_size=clip_batch_size,

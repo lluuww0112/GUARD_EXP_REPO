@@ -2,9 +2,11 @@ import inspect
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import torch
+from huggingface_hub import snapshot_download
 from transformers import (
     AutoConfig,
     AutoModelForImageTextToText,
@@ -40,6 +42,23 @@ BACKEND_MODEL_TYPE_HINTS = {
 BACKEND_SUGGESTED_MODEL_IDS = {
     "llava_next": "llava-hf/llava-v1.6-mistral-7b-hf",
 }
+
+SNAPSHOT_DOWNLOAD_KEYS = (
+    "cache_dir",
+    "force_download",
+    "local_files_only",
+    "revision",
+    "token",
+)
+
+
+def _sanitize_model_id_for_path(model_id: str) -> str:
+    safe = model_id.replace("\\", "/").strip()
+    safe = safe.replace("/", "__").replace(":", "_").replace("@", "_")
+    return "".join(
+        char if (char.isalnum() or char in {"-", "_", "."}) else "_"
+        for char in safe
+    )
 
 
 
@@ -94,6 +113,7 @@ class BaseVLM(VLMInterface):
         dtype: str | torch.dtype | None = None,
         token_selector_kwargs: dict[str, Any] | None = None,
         fallback_to_standard_path: bool = True,
+        local_model_dir: str | None = None,
         **frame_selector_kwargs: Any,
     ):
         if backend not in VLM_BACKENDS:
@@ -114,6 +134,12 @@ class BaseVLM(VLMInterface):
         self.dtype = DTYPE_MAP[dtype] if isinstance(dtype, str) else dtype
         self.token_selector_kwargs = dict(token_selector_kwargs or {})
         self.fallback_to_standard_path = fallback_to_standard_path
+        self.local_model_dir = (
+            Path(local_model_dir).expanduser()
+            if local_model_dir is not None
+            else None
+        )
+        self.resolved_model_source = model_id
         self.last_token_selection_info: dict[str, Any] = {
             "applied": False,
             "backend": backend,
@@ -129,14 +155,15 @@ class BaseVLM(VLMInterface):
     ) -> tuple[ProcessorMixin, PreTrainedModel | GenerationMixin]:
         use_cuda = torch.cuda.is_available()
         dtype = self.dtype or (torch.float16 if use_cuda else torch.float32)
-        self._validate_backend_model_type(model_id)
+        model_source = self._resolve_model_source(model_id)
+        self._validate_backend_model_type(model_source)
 
         processor = self.processor_cls.from_pretrained(
-            model_id,
+            model_source,
             **self.processor_kwargs,
         )
         model = self.model_cls.from_pretrained(
-            model_id,
+            model_source,
             torch_dtype=dtype,
             device_map="auto" if use_cuda else None,
             **self.model_kwargs,
@@ -147,6 +174,87 @@ class BaseVLM(VLMInterface):
 
         model.eval()
         return processor, model
+
+    def _extract_snapshot_download_kwargs(self) -> dict[str, Any]:
+        download_kwargs: dict[str, Any] = {}
+        for source_kwargs in (self.processor_kwargs, self.model_kwargs):
+            for key in SNAPSHOT_DOWNLOAD_KEYS:
+                if key in source_kwargs:
+                    download_kwargs[key] = source_kwargs[key]
+        return download_kwargs
+
+    def _as_existing_local_path(
+        self,
+        model_id: str,
+    ) -> Path | None:
+        model_path = Path(model_id).expanduser()
+        if model_path.exists():
+            return model_path.resolve()
+        return None
+
+    def _build_local_model_path(
+        self,
+        model_id: str,
+    ) -> Path | None:
+        if self.local_model_dir is None:
+            return None
+
+        revision = self._extract_snapshot_download_kwargs().get("revision")
+        revision_suffix = ""
+        if revision:
+            safe_revision = _sanitize_model_id_for_path(str(revision))
+            revision_suffix = f"__rev_{safe_revision}"
+
+        return self.local_model_dir / (
+            f"{_sanitize_model_id_for_path(model_id)}{revision_suffix}"
+        )
+
+    def _is_local_snapshot_ready(
+        self,
+        local_model_path: Path,
+    ) -> bool:
+        if not local_model_path.exists() or not local_model_path.is_dir():
+            return False
+        return (local_model_path / "config.json").exists()
+
+    def _resolve_model_source(
+        self,
+        model_id: str,
+    ) -> str:
+        existing_local = self._as_existing_local_path(model_id)
+        if existing_local is not None:
+            self.resolved_model_source = str(existing_local)
+            return self.resolved_model_source
+
+        local_model_path = self._build_local_model_path(model_id)
+        if local_model_path is None:
+            self.resolved_model_source = model_id
+            return self.resolved_model_source
+
+        if self._is_local_snapshot_ready(local_model_path):
+            self.resolved_model_source = str(local_model_path)
+            return self.resolved_model_source
+
+        download_kwargs = self._extract_snapshot_download_kwargs()
+        try:
+            local_model_path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_download(
+                repo_id=model_id,
+                local_dir=str(local_model_path),
+                **download_kwargs,
+            )
+            if self._is_local_snapshot_ready(local_model_path):
+                self.resolved_model_source = str(local_model_path)
+                return self.resolved_model_source
+        except Exception as exc:
+            warnings.warn(
+                "Failed to mirror model snapshot into local_model_dir; "
+                f"falling back to default Hugging Face loading path. reason={exc}",
+                stacklevel=2,
+            )
+
+        self.resolved_model_source = model_id
+        return self.resolved_model_source
 
     def _extract_config_load_kwargs(self) -> dict[str, Any]:
         config_kwargs: dict[str, Any] = {}

@@ -30,6 +30,7 @@ class KTVSelector(VLMInterface):
         dtype: str | torch.dtype | None = None,
         token_selector_kwargs: dict[str, Any] | None = None,
         fallback_to_standard_path: bool = True,
+        local_model_dir: str | None = None,
         preload_auxiliary_models: bool = True,
         **frame_selector_kwargs: Any,
     ):
@@ -37,6 +38,13 @@ class KTVSelector(VLMInterface):
         self.backend = backend
         self.processor_kwargs = dict(processor_kwargs or {})
         self.model_kwargs = dict(model_kwargs or {})
+        self.local_model_dir = local_model_dir
+        effective_token_selector_kwargs = dict(token_selector_kwargs or {})
+        if self.local_model_dir is not None:
+            effective_token_selector_kwargs.setdefault(
+                "local_model_dir",
+                self.local_model_dir,
+            )
 
         vlm_cls = self._select_vlm_cls(model_id=model_id, backend=backend)
         self.impl = vlm_cls(
@@ -48,8 +56,9 @@ class KTVSelector(VLMInterface):
             model_kwargs=model_kwargs,
             generation_kwargs=generation_kwargs,
             dtype=dtype,
-            token_selector_kwargs=token_selector_kwargs,
+            token_selector_kwargs=effective_token_selector_kwargs,
             fallback_to_standard_path=fallback_to_standard_path,
+            local_model_dir=local_model_dir,
             **frame_selector_kwargs,
         )
 
@@ -57,7 +66,7 @@ class KTVSelector(VLMInterface):
             self._preload_auxiliary_models(
                 frame_selector=frame_selector,
                 token_selector=token_selector,
-                token_selector_kwargs=token_selector_kwargs,
+                token_selector_kwargs=effective_token_selector_kwargs,
             )
 
     def _unwrap_selector(
@@ -99,6 +108,7 @@ class KTVSelector(VLMInterface):
                     ),
                     local_files_only=bool(frame_kwargs.get("local_files_only", False)),
                     dtype=frame_kwargs.get("dtype"),
+                    local_model_dir=self.local_model_dir,
                 )
             except Exception as exc:
                 warnings.warn(
@@ -121,6 +131,10 @@ class KTVSelector(VLMInterface):
                             ktv_selection.DEFAULT_CLIP_MODEL_ID,
                         )
                     ),
+                    local_files_only=bool(
+                        token_kwargs.get("clip_local_files_only", False)
+                    ),
+                    local_model_dir=self.local_model_dir,
                 )
             except Exception as exc:
                 warnings.warn(
@@ -182,10 +196,16 @@ class KTVSelector(VLMInterface):
         prompt: str,
         **frame_selector_kwargs: Any,
     ) -> str:
+        effective_frame_selector_kwargs = dict(frame_selector_kwargs)
+        if self.local_model_dir is not None:
+            effective_frame_selector_kwargs.setdefault(
+                "local_model_dir",
+                self.local_model_dir,
+            )
         return self.impl.answer(
             video_path=video_path,
             prompt=prompt,
-            **frame_selector_kwargs,
+            **effective_frame_selector_kwargs,
         )
 
     def __getattr__(self, name: str) -> Any:
