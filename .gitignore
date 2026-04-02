@@ -5,3 +5,4 @@ __pycache__/
 /data
 /outputs
 /model/repo
+/utils/*.json
