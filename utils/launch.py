@@ -3,10 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
-from typing import Any
+from threading import Lock, local
+from typing import Any, Callable, TypeVar
 
 
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
@@ -23,6 +25,10 @@ FIXED_EXCLUDE_PATTERNS = (
     ".ignore",
     ".rgignore",
 )
+DEFAULT_SYNC_WORKERS = 8
+PROGRESS_LABEL_WIDTH = 60
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -402,6 +408,7 @@ def ensure_remote_parent_folder(
 
 def apply_sync_plan(
     service: Any,
+    service_factory: Callable[[], Any],
     root_id: str,
     plan: SyncPlan,
 ) -> None:
@@ -422,40 +429,170 @@ def apply_sync_plan(
         },
     }
 
-    for remote_entry in progress_iter(
+    run_parallel_tasks(
         plan.deletes,
         desc="Deleting remote",
         unit="item",
-    ):
-        service.files().delete(fileId=remote_entry.id).execute()
+        label_fn=lambda remote_entry: remote_entry.rel_path,
+        service_factory=service_factory,
+        worker_fn=lambda worker_service, remote_entry: worker_service.files()
+        .delete(fileId=remote_entry.id)
+        .execute(),
+    )
 
-    for local_file in progress_iter(
-        plan.uploads,
-        desc="Uploading local",
-        unit="file",
-    ):
-        parent_rel = normalize_rel_path(PurePosixPath(local_file.rel_path).parent)
-        parent_id = ensure_remote_parent_folder(service, root_id, folder_cache, parent_rel)
+    prepare_remote_parent_folders(service, root_id, folder_cache, plan.uploads)
+    upload_parent_ids = {
+        local_file.rel_path: folder_cache[
+            normalize_rel_path(PurePosixPath(local_file.rel_path).parent)
+        ]
+        for local_file in plan.uploads
+    }
+
+    def upload_local_file(worker_service: Any, local_file: LocalFile) -> None:
         media = MediaFileUpload(str(local_file.abs_path), resumable=False)
-        service.files().create(
-            body={"name": PurePosixPath(local_file.rel_path).name, "parents": [parent_id]},
+        worker_service.files().create(
+            body={
+                "name": PurePosixPath(local_file.rel_path).name,
+                "parents": [upload_parent_ids[local_file.rel_path]],
+            },
             media_body=media,
             fields="id",
         ).execute()
+
+    run_parallel_tasks(
+        plan.uploads,
+        desc="Uploading local",
+        unit="file",
+        label_fn=lambda local_file: local_file.rel_path,
+        service_factory=service_factory,
+        worker_fn=upload_local_file,
+    )
 
 
 def escape_drive_query_value(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def progress_iter(items: tuple[Any, ...], *, desc: str, unit: str) -> Any:
+def prepare_remote_parent_folders(
+    service: Any,
+    root_id: str,
+    folder_cache: dict[str, str],
+    uploads: tuple[LocalFile, ...],
+) -> None:
+    parent_dirs = sorted(
+        {
+            normalize_rel_path(PurePosixPath(local_file.rel_path).parent)
+            for local_file in uploads
+        },
+        key=lambda rel_path: (rel_path.count("/"), rel_path),
+    )
+
+    for rel_dir in parent_dirs:
+        ensure_remote_parent_folder(service, root_id, folder_cache, rel_dir)
+
+
+class ProgressTracker:
+    def __init__(self, progress_bar: Any | None):
+        self.progress_bar = progress_bar
+        self._active_labels: dict[str, int] = {}
+        self._lock = Lock()
+        self._sequence = 0
+
+    def start(self, label: str) -> None:
+        with self._lock:
+            self._sequence += 1
+            self._active_labels[label] = self._sequence
+            self._refresh_locked()
+
+    def finish(self, label: str) -> None:
+        with self._lock:
+            self._active_labels.pop(label, None)
+            self._refresh_locked()
+
+    def _refresh_locked(self) -> None:
+        if self.progress_bar is None:
+            return
+
+        if self._active_labels:
+            current = max(self._active_labels, key=self._active_labels.__getitem__)
+            self.progress_bar.set_postfix_str(
+                shorten_progress_label(current),
+                refresh=False,
+            )
+            return
+
+        self.progress_bar.set_postfix_str("", refresh=False)
+
+
+def shorten_progress_label(label: str, *, width: int = PROGRESS_LABEL_WIDTH) -> str:
+    if len(label) <= width:
+        return label
+    return f"...{label[-(width - 3):]}"
+
+
+def resolve_sync_workers(item_count: int) -> int:
+    if item_count <= 0:
+        return 0
+    return min(DEFAULT_SYNC_WORKERS, item_count)
+
+
+def run_parallel_tasks(
+    items: tuple[T, ...],
+    *,
+    desc: str,
+    unit: str,
+    label_fn: Callable[[T], str],
+    service_factory: Callable[[], Any],
+    worker_fn: Callable[[Any, T], None],
+) -> None:
     if not items:
-        return items
+        return
+
     try:
         from tqdm import tqdm
     except ImportError:
-        return items
-    return tqdm(items, desc=desc, unit=unit)
+        tqdm = None
+
+    max_workers = resolve_sync_workers(len(items))
+    thread_state = local()
+    progress_bar = (
+        tqdm(total=len(items), desc=desc, unit=unit)
+        if tqdm is not None
+        else None
+    )
+    tracker = ProgressTracker(progress_bar)
+
+    def get_thread_service() -> Any:
+        worker_service = getattr(thread_state, "service", None)
+        if worker_service is None:
+            worker_service = service_factory()
+            thread_state.service = worker_service
+        return worker_service
+
+    def run_item(item: T) -> None:
+        label = label_fn(item)
+        tracker.start(label)
+        try:
+            worker_fn(get_thread_service(), item)
+        finally:
+            tracker.finish(label)
+
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            pending = {executor.submit(run_item, item) for item in items}
+            while pending:
+                done, pending = wait(
+                    pending,
+                    timeout=0.1,
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in done:
+                    future.result()
+                    if progress_bar is not None:
+                        progress_bar.update(1)
+    finally:
+        if progress_bar is not None:
+            progress_bar.close()
 
 
 def format_dest_path(dest_segments: list[str]) -> str:
@@ -535,13 +672,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     repo_root = args.repo_root.resolve()
+    client_secret_path = args.client_secret.expanduser().resolve()
+    token_path = args.token_path.expanduser().resolve()
     dest_segments = parse_dest_path(args.dest_path)
     ignore_matcher = IgnoreMatcher(load_ignore_patterns(repo_root))
     scan_result = collect_local_files(repo_root, ignore_matcher)
 
     service = get_drive_service(
-        client_secret_path=args.client_secret.expanduser().resolve(),
-        token_path=args.token_path.expanduser().resolve(),
+        client_secret_path=client_secret_path,
+        token_path=token_path,
     )
     root_id = resolve_dest_root(service, dest_segments)
     remote_files, remote_folders = scan_remote_tree(service, root_id)
@@ -563,7 +702,12 @@ def main() -> None:
     if args.dry_run:
         return
 
-    apply_sync_plan(service, root_id, plan)
+    service_factory = lambda: get_drive_service(
+        client_secret_path=client_secret_path,
+        token_path=token_path,
+    )
+
+    apply_sync_plan(service, service_factory, root_id, plan)
     print("Result     : sync completed")
 
 

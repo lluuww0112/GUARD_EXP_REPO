@@ -63,7 +63,7 @@ pip install -r requirements.launch.txt
 ```bash
 python utils/launch.py \
   --dest-path Lab/GUARD_EXP_REPO \
-  --client-secret /path/to/client_secret.json
+  --client-secret ./utils/client_secret.json 
 ```
 
 위 명령은 아래 Drive 경로를 기준으로 동작합니다.
@@ -79,7 +79,7 @@ MyDrive/Lab/GUARD_EXP_REPO
 ```bash
 python utils/launch.py \
   --dest-path MyDrive/Lab/GUARD_EXP_REPO \
-  --client-secret /path/to/client_secret.json
+  --client-secret ./utils/client_secret.json \
 ```
 
 ## Useful Options
@@ -91,7 +91,7 @@ python utils/launch.py \
 ```bash
 python utils/launch.py \
   --dest-path Lab/GUARD_EXP_REPO \
-  --client-secret /path/to/client_secret.json \
+  --client-secret ./utils/client_secret.json \
   --dry-run
 ```
 
@@ -102,7 +102,7 @@ python utils/launch.py \
 ```bash
 python utils/launch.py \
   --dest-path Lab/GUARD_EXP_REPO \
-  --client-secret /path/to/client_secret.json \
+  --client-secret ./utils/client_secret.json \
   --dry-run \
   --verbose
 ```
@@ -114,7 +114,7 @@ python utils/launch.py \
 ```bash
 python utils/launch.py \
   --dest-path Lab/GUARD_EXP_REPO \
-  --client-secret /path/to/client_secret.json \
+  --client-secret ./utils/client_secret.json \
   --token-path /path/to/google_drive_token.json
 ```
 
@@ -126,7 +126,7 @@ python utils/launch.py \
 python utils/launch.py \
   --repo-root /path/to/repo \
   --dest-path Lab/GUARD_EXP_REPO \
-  --client-secret /path/to/client_secret.json
+  --client-secret /utils/client_secret.json 
 ```
 
 ## Ignore Rules
@@ -207,9 +207,9 @@ cd /content/drive/MyDrive/Lab/GUARD_EXP_REPO
 pip install -r requirements.launch.txt
 python utils/launch.py \
   --dest-path Lab/GUARD_EXP_REPO \
-  --client-secret /path/to/client_secret.json \
+  --client-secret ./utils/client_secret.json \
   --dry-run --verbose
 python utils/launch.py \
   --dest-path Lab/GUARD_EXP_REPO \
-  --client-secret /path/to/client_secret.json
+  --client-secret ./utils/client_secret.json \
 ```
