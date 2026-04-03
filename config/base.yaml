@@ -14,7 +14,7 @@ hydra:
 frame_selection: 
   _target_: model.base.uniform_sampling
   _partial_: true
-  num_frames: 10
+  num_frames: 50
   max_side: 224
   ensure_qwen_compatibility: true
 
@@ -42,12 +42,12 @@ vlm:
   model_kwargs: {} # 모델 로드시 .from_pretrained() 옵션 설정
   local_model_dir: "./model/repo"
   generation_kwargs: # 생성시점 옵션, 출력 샘플링 / 온도 설정 / top_p등 설정 가능
-    do_sample: true
+    do_sample: false
     top_p: 0.8
     max_new_tokens: 256
 
 invoke: 
-  video_path: "./data/fcN5HGqVzC0.mp4"
+  video_path: "./data/Mcst74e8S9U.mp4"
   prompt_file: "model/base/prompt.txt"
   query_file: "model/base/query.txt"
   print_config: false # 현재 yaml 파일 내용 출력 여부

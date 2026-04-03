@@ -170,6 +170,12 @@ def main(config: DictConfig) -> None:
         enabled=invoke_config.get("quiet_model_loading", True),
     ):
         vlm = build_vlm(config)
+        preload_runtime_resources = getattr(vlm, "preload_runtime_resources", None)
+        if callable(preload_runtime_resources):
+            preload_runtime_resources(
+                video_path=str(video_path),
+                prompt=prompt,
+            )
 
     if invoke_config.get("print_config", False):
         print("=== Resolved Config ===")
@@ -208,6 +214,12 @@ def main(config: DictConfig) -> None:
     print()
     print("=== Timing ===")
     print(f"Elapsed     : {elapsed:.2f}s")
+    timing_info = getattr(vlm, "last_timing_info", {}) or {}
+    llm_generate_seconds = timing_info.get("llm_generate_seconds")
+    if llm_generate_seconds is not None:
+        llm_generate_seconds = float(llm_generate_seconds)
+        print(f"LLM Generate: {llm_generate_seconds:.2f}s")
+        print(f"Non-LLM     : {max(elapsed - llm_generate_seconds, 0.0):.2f}s")
 
 
 if __name__ == "__main__":

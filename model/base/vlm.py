@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import functools
 import importlib.util
 import inspect
+import time
 from types import MethodType
 import warnings
 from abc import ABC, abstractmethod
@@ -159,10 +161,64 @@ class BaseVLM(VLMInterface):
             "backend": backend,
             "reason": "not_run",
         }
+        self.last_timing_info: dict[str, Any] = {}
 
         self.processor: ProcessorMixin
         self.model: PreTrainedModel | GenerationMixin
         self.processor, self.model = self.build_vlm(model_id)
+
+    def _resolve_preload_hook(self) -> tuple[Callable[..., Any], dict[str, Any]] | None:
+        if self.patch_selector is None:
+            return None
+
+        selector = self.patch_selector
+        selector_kwargs: dict[str, Any] = {}
+        if isinstance(selector, functools.partial):
+            selector_kwargs = dict(selector.keywords or {})
+            selector = selector.func
+
+        preload_hook = getattr(self.patch_selector, "preload", None)
+        if preload_hook is None:
+            preload_hook = getattr(selector, "preload", None)
+        if preload_hook is None or not callable(preload_hook):
+            return None
+
+        return preload_hook, selector_kwargs
+
+    def preload_runtime_resources(
+        self,
+        *,
+        prompt: PromptInput | None = None,
+        video_path: str | None = None,
+    ) -> None:
+        preload_target = self._resolve_preload_hook()
+        if preload_target is None:
+            return
+
+        preload_hook, selector_kwargs = preload_target
+        preload_inputs = {
+            **selector_kwargs,
+            "prompt": prompt,
+            "video_path": video_path,
+            "processor": self.processor,
+            "model": self.model,
+            "backend": self.backend,
+        }
+        signature = inspect.signature(preload_hook)
+        accepts_var_keyword = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
+        )
+        if accepts_var_keyword:
+            preload_hook(**preload_inputs)
+            return
+
+        filtered_kwargs = {
+            name: value
+            for name, value in preload_inputs.items()
+            if name in signature.parameters
+        }
+        preload_hook(**filtered_kwargs)
 
     def build_vlm(
         self,
@@ -692,14 +748,20 @@ class BaseVLM(VLMInterface):
         model_inputs: dict[str, Any],
     ) -> str:
         generation_model_inputs = self._prepare_generation_model_inputs(model_inputs)
+        generate_start = time.perf_counter()
         with torch.inference_mode():
             output_ids = self.model.generate(
                 **generation_model_inputs,
                 **self.generation_kwargs,
             )
+        generate_elapsed = time.perf_counter() - generate_start
 
         input_ids = generation_model_inputs.get("input_ids")
         prompt_length = input_ids.shape[1] if input_ids is not None else 0
+        self.last_timing_info = {
+            "path": "standard_generation",
+            "llm_generate_seconds": generate_elapsed,
+        }
         return self._decode_generation_output(output_ids, prompt_length=prompt_length)
 
     def _reset_multimodal_state(self) -> None:
@@ -937,16 +999,30 @@ class BaseVLM(VLMInterface):
         )
         inputs_embeds = self.model.get_input_embeddings()(input_ids)
         model_core.rope_deltas = None
-        position_ids = model_core.compute_3d_position_ids(
-            input_ids=input_ids,
-            image_grid_thw=model_inputs.get("image_grid_thw"),
-            video_grid_thw=model_inputs.get("video_grid_thw"),
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            past_key_values=None,
-            second_per_grid_ts=model_inputs.get("second_per_grid_ts"),
-            mm_token_type_ids=mm_token_type_ids,
+        position_id_kwargs = {
+            "input_ids": input_ids,
+            "image_grid_thw": model_inputs.get("image_grid_thw"),
+            "video_grid_thw": model_inputs.get("video_grid_thw"),
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "past_key_values": None,
+            "second_per_grid_ts": model_inputs.get("second_per_grid_ts"),
+            "mm_token_type_ids": mm_token_type_ids,
+        }
+        signature = inspect.signature(model_core.compute_3d_position_ids)
+        accepts_var_keyword = any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD
+            for parameter in signature.parameters.values()
         )
+        if accepts_var_keyword:
+            position_ids = model_core.compute_3d_position_ids(**position_id_kwargs)
+        else:
+            filtered_kwargs = {
+                name: value
+                for name, value in position_id_kwargs.items()
+                if name in signature.parameters
+            }
+            position_ids = model_core.compute_3d_position_ids(**filtered_kwargs)
         if position_ids is None:
             raise RuntimeError("Failed to compute multimodal position ids for patch selection.")
         return position_ids
@@ -969,8 +1045,11 @@ class BaseVLM(VLMInterface):
             input_ids=input_ids,
             existing_ids=model_inputs.get("mm_token_type_ids"),
         )
-        position_ids = self._compute_full_position_ids(
+        position_id_model_inputs = self._prepare_generation_model_inputs(
             {**model_inputs, "mm_token_type_ids": mm_token_type_ids}
+        )
+        position_ids = self._compute_full_position_ids(
+            position_id_model_inputs
         )
 
         video_token_id = getattr(self.model.config, "video_token_id", None)
@@ -1058,11 +1137,13 @@ class BaseVLM(VLMInterface):
             selected_features=selected_features,
         )
 
+        generate_start = time.perf_counter()
         with torch.inference_mode():
             output_ids = self.model.generate(
                 **generation_inputs,
                 **self.generation_kwargs,
             )
+        generate_elapsed = time.perf_counter() - generate_start
 
         prompt_length = generation_inputs["input_ids"].shape[1]
         self.last_patch_selection_info = {
@@ -1071,6 +1152,10 @@ class BaseVLM(VLMInterface):
             **extraction_metadata,
             **pruning_metadata,
             "selector_output_keys": sorted(selector_metadata.keys()),
+        }
+        self.last_timing_info = {
+            "path": "patch_selection_generation",
+            "llm_generate_seconds": generate_elapsed,
         }
         return self._decode_generation_output(output_ids, prompt_length=prompt_length)
 
@@ -1099,6 +1184,7 @@ class BaseVLM(VLMInterface):
             video_tensor=video_tensor,
             frame_selection=frame_selection,
         )
+        self.last_timing_info = {}
 
         if self.patch_selector is not None and video_tensor is not None:
             return self._run_patch_selection_generation(
