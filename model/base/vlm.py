@@ -714,6 +714,15 @@ class BaseVLM(VLMInterface):
             clean_up_tokenization_spaces=True,
         )[0].strip()
 
+    def _count_generated_tokens(
+        self,
+        output_ids: torch.Tensor,
+        prompt_length: int,
+    ) -> int:
+        if output_ids.ndim != 2:
+            return 0
+        return max(int(output_ids.shape[1]) - int(prompt_length), 0)
+
     def _prepare_generation_model_inputs(
         self,
         model_inputs: dict[str, Any],
@@ -758,9 +767,14 @@ class BaseVLM(VLMInterface):
 
         input_ids = generation_model_inputs.get("input_ids")
         prompt_length = input_ids.shape[1] if input_ids is not None else 0
+        generated_tokens = self._count_generated_tokens(
+            output_ids,
+            prompt_length=prompt_length,
+        )
         self.last_timing_info = {
             "path": "standard_generation",
             "llm_generate_seconds": generate_elapsed,
+            "generated_tokens": generated_tokens,
         }
         return self._decode_generation_output(output_ids, prompt_length=prompt_length)
 
@@ -1146,6 +1160,10 @@ class BaseVLM(VLMInterface):
         generate_elapsed = time.perf_counter() - generate_start
 
         prompt_length = generation_inputs["input_ids"].shape[1]
+        generated_tokens = self._count_generated_tokens(
+            output_ids,
+            prompt_length=prompt_length,
+        )
         self.last_patch_selection_info = {
             "applied": True,
             "backend": self.backend,
@@ -1156,6 +1174,7 @@ class BaseVLM(VLMInterface):
         self.last_timing_info = {
             "path": "patch_selection_generation",
             "llm_generate_seconds": generate_elapsed,
+            "generated_tokens": generated_tokens,
         }
         return self._decode_generation_output(output_ids, prompt_length=prompt_length)
 
