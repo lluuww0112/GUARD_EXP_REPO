@@ -14,8 +14,8 @@ hydra:
 frame_selection: 
   _target_: model.base.uniform_sampling
   _partial_: true
-  num_frames: 50
-  max_side: 224
+  num_frames: 10
+  max_side: 720
   ensure_qwen_compatibility: true
 
 patch_selection: null
@@ -26,7 +26,7 @@ vlm:
   backend: "qwen3_vl" # 현재 프로젝트의 기준 VLM 백엔드
   dtype: "bf16" # Enum[ bf16 | fp16 | fp32 ]
   quantization:
-    enabled: True # true면 bitsandbytes 양자화 활성화 (CUDA 필요)
+    enabled: false # true면 bitsandbytes 양자화 활성화 (CUDA 필요)
     mode: "4bit" # 4bit는 메모리 절감, 8bit는 정확도/안정성에 더 유리한 편
     skip_vision_encoder: true # vision encoder는 성능 저하 방지를 위해 기본적으로 제외
     skip_modules: [] # 추가 제외 모듈명 리스트 (예: ["multi_modal_projector"])
@@ -43,8 +43,8 @@ vlm:
   local_model_dir: "./model/repo"
   generation_kwargs: # 생성시점 옵션, 출력 샘플링 / 온도 설정 / top_p등 설정 가능
     do_sample: false
-    top_p: 0.8
-    max_new_tokens: 256
+    # top_p: 0.8
+    max_new_tokens: 128
 
 invoke: 
   video_path: "./data/Mcst74e8S9U.mp4"
