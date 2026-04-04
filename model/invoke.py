@@ -216,10 +216,17 @@ def main(config: DictConfig) -> None:
     print(f"Elapsed     : {elapsed:.2f}s")
     timing_info = getattr(vlm, "last_timing_info", {}) or {}
     llm_generate_seconds = timing_info.get("llm_generate_seconds")
+    generated_tokens = timing_info.get("generated_tokens")
     if llm_generate_seconds is not None:
         llm_generate_seconds = float(llm_generate_seconds)
         print(f"LLM Generate: {llm_generate_seconds:.2f}s")
         print(f"Non-LLM     : {max(elapsed - llm_generate_seconds, 0.0):.2f}s")
+        if generated_tokens is not None:
+            generated_tokens = int(generated_tokens)
+            print(f"Gen Tokens  : {generated_tokens}")
+            if llm_generate_seconds > 0:
+                print(f"LLM Tok/s   : {generated_tokens / llm_generate_seconds:.2f}")
+        
 
 
 if __name__ == "__main__":
