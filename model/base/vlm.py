@@ -873,8 +873,6 @@ class BaseVLM(VLMInterface):
             else torch.tensor(indices, device=device, dtype=torch.long)
         )
         tensor = tensor.to(device=device, dtype=torch.long).flatten()
-        if tensor.numel() == 0:
-            raise ValueError("Patch selector returned an empty selection.")
         if torch.any(tensor < 0) or torch.any(tensor >= upper_bound):
             raise ValueError(
                 f"Patch selector indices must be within [0, {upper_bound}), got {tensor.tolist()}."
@@ -920,7 +918,7 @@ class BaseVLM(VLMInterface):
                 raise ValueError(
                     "Tensor patch selector output must be 1D indices or 2D features."
                 )
-        elif isinstance(selection_output, (list, tuple)) and selection_output and all(
+        elif isinstance(selection_output, (list, tuple)) and all(
             isinstance(item, int) for item in selection_output
         ):
             selected_indices = torch.tensor(
