@@ -69,6 +69,74 @@ class CLIPVisionModel(nn.Module):
         return patch_embeddings
 
 
+class CLIPVisionModel_v2(CLIPVisionModel):
+    def _forward_to_final_block_input(
+        self,
+        pixel_values: torch.Tensor,
+    ) -> torch.Tensor:
+        hidden_states = self.vision_model.embeddings(pixel_values=pixel_values)
+        hidden_states = self.vision_model.pre_layrnorm(hidden_states)
+
+        encoder_layers = self.vision_model.encoder.layers
+        for encoder_layer in encoder_layers[:-1]:
+            layer_outputs = encoder_layer(
+                hidden_states=hidden_states,
+                attention_mask=None,
+                causal_attention_mask=None,
+                output_attentions=False,
+            )
+            if isinstance(layer_outputs, tuple):
+                hidden_states = layer_outputs[0]
+            else:
+                hidden_states = layer_outputs
+
+        return hidden_states
+
+    def _forward_maskclip_dense_from_final_block_input(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        last_layer = self.vision_model.encoder.layers[-1]
+
+        hidden_states = last_layer.layer_norm1(hidden_states)
+        hidden_states = last_layer.self_attn.v_proj(hidden_states)
+        hidden_states = last_layer.self_attn.out_proj(hidden_states)
+
+        projected_tokens = self.visual_projection(hidden_states)
+        return projected_tokens[:, 1:, :]
+
+    def _forward_global_latent_from_final_block_input(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        last_layer = self.vision_model.encoder.layers[-1]
+        layer_outputs = last_layer(
+            hidden_states=hidden_states,
+            attention_mask=None,
+            causal_attention_mask=None,
+            output_attentions=False,
+        )
+        if isinstance(layer_outputs, tuple):
+            last_hidden_state = layer_outputs[0]
+        else:
+            last_hidden_state = layer_outputs
+
+        pooled_output = self.vision_model.post_layernorm(last_hidden_state[:, 0, :])
+        return self.visual_projection(pooled_output)
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states = self._forward_to_final_block_input(pixel_values)
+        patch_embeddings = self._forward_maskclip_dense_from_final_block_input(
+            hidden_states
+        )
+        image_latent = self._forward_global_latent_from_final_block_input(hidden_states)
+        return patch_embeddings, image_latent
+
+
+
 
 class CLIPTextModel(nn.Module):
     def __init__(self, pretrained_name: str):
@@ -107,5 +175,3 @@ class CLIPTextModel(nn.Module):
         eos_hidden_states = last_hidden_state[batch_indices, eos_token_indices]
 
         return self.text_projection(eos_hidden_states)    
-
-

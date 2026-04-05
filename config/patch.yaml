@@ -16,30 +16,19 @@ frame_selection:
   max_side: 720
   ensure_qwen_compatibility: true
 
-patch_selection_v1:
-  _target_: model.PatchSelection.selection_v1.maskclip_sliding_window_patch_selection
+patch_selection:
+  _target_: model.PatchSelection.selection.maskclip_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
   clip_model_name: "openai/clip-vit-base-patch16"
   clip_dtype: "bf16"
   keep_ratio: 0.075
+  selection_mode: "merge" # Enum["merge" | "sliding_window"], merge -> 단순 평균 산출, sliding_window -> 경계 정보 보전하며 윈도우 슬라이딩으로 패치 스코어 산출
   window_size: 2
   window_stride: 1
-  aggregation: "max"
+  aggregation: "max" # 다중 쿼리 집계 방식, Enum["max" | "mean"]
   batch_size: ${frame_selection.num_frames}
-  spatial_merge_size: null
-  device: null
-
-patch_selection_v2:
-  _target_: model.PatchSelection.selection_v2.maskclip_naive_patch_selection
-  _partial_: true
-  query_file: ${invoke.query_file}
-  clip_model_name: ${patch_selection_v1.clip_model_name}
-  clip_dtype: ${patch_selection_v1.clip_dtype}
-  keep_ratio: ${patch_selection_v1.keep_ratio}
-  aggregation: ${patch_selection_v1.aggregation}
-  batch_size: ${frame_selection.num_frames}
-  spatial_merge_size: null
+  spatial_merge_size: null # qwen-vl의 merge 사이즈를 명시적으로 맞추는 옵션, null로 하면 기본 크기인 2로 설정
   device: null
 
 
@@ -60,7 +49,7 @@ vlm:
       llm_int8_threshold: 6.0
       llm_int8_enable_fp32_cpu_offload: false
   frame_selector: ${frame_selection}
-  patch_selector: ${patch_selection_v2}
+  patch_selector: ${patch_selection}
   processor_kwargs: {}
   model_kwargs: {}
   local_model_dir: "./model/repo"

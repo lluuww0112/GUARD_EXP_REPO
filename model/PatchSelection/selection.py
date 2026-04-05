@@ -14,6 +14,7 @@ from .cilp_model import CLIPTextModel, CLIPVisionModel
 
 
 SUPPORTED_QWEN_BACKENDS = {"qwen2_vl", "qwen2_5_vl", "qwen3_vl"}
+SUPPORTED_SELECTION_MODES = {"merge", "sliding_window"}
 CLIP_DTYPE_MAP = {
     "bf16": torch.bfloat16,
     "fp16": torch.float16,
@@ -62,6 +63,22 @@ def _resolve_clip_dtype(
             f"Unsupported `clip_dtype`: {clip_dtype}. Available: {available}."
         )
     return resolved, normalized
+
+
+def _resolve_selection_mode(selection_mode: str) -> str:
+    normalized = str(selection_mode).strip().lower()
+    if normalized not in SUPPORTED_SELECTION_MODES:
+        available = ", ".join(sorted(SUPPORTED_SELECTION_MODES))
+        raise ValueError(
+            f"Unsupported `selection_mode`: {selection_mode}. Available: {available}."
+        )
+    return normalized
+
+
+def _resolve_device_key(device: torch.device) -> str:
+    if device.index is None:
+        return device.type
+    return str(device)
 
 
 def _resolve_spatial_merge_size(
@@ -122,18 +139,34 @@ def _resolve_temporal_patch_size(
     return int(default)
 
 
-def _load_queries(query_file: str | Path) -> list[str]:
+@lru_cache(maxsize=16)
+def _load_queries_cached(
+    resolved_path: str,
+    modified_time_ns: int,
+) -> tuple[str, ...]:
+    del modified_time_ns
+    path = Path(resolved_path)
+    queries = tuple(
+        line.strip()
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    )
+    if not queries:
+        raise ValueError(f"Query file does not contain any non-empty lines: {path}")
+    return queries
+
+
+def _load_queries(query_file: str | Path) -> tuple[str, ...]:
     path = Path(query_file).expanduser()
     if not path.exists():
         raise FileNotFoundError(f"Query file does not exist: {path}")
     if not path.is_file():
         raise ValueError(f"Query file path must point to a file: {path}")
-
-    queries = [line.strip() for line in path.read_text(encoding="utf-8").splitlines()]
-    queries = [query for query in queries if query]
-    if not queries:
-        raise ValueError(f"Query file does not contain any non-empty lines: {path}")
-    return queries
+    stat = path.stat()
+    return _load_queries_cached(
+        str(path.resolve()),
+        stat.st_mtime_ns,
+    )
 
 
 def _coerce_video_frames(frame_selection: FrameSelectionResult) -> torch.Tensor:
@@ -200,7 +233,7 @@ def _load_maskclip_components(
     return image_processor, tokenizer, vision_model, text_model
 
 
-def preload_maskclip_sliding_window_patch_selection(
+def preload_maskclip_patch_selection(
     *,
     clip_model_name: str = "openai/clip-vit-base-patch16",
     clip_dtype: str | torch.dtype | None = None,
@@ -213,34 +246,57 @@ def preload_maskclip_sliding_window_patch_selection(
         if device is not None
         else _resolve_model_device(model)
     )
-    device_key = (
-        preload_device.type
-        if preload_device.index is None
-        else str(preload_device)
-    )
+    device_key = _resolve_device_key(preload_device)
     _, clip_dtype_key = _resolve_clip_dtype(clip_dtype)
     _load_maskclip_components(clip_model_name, device_key, clip_dtype_key)
 
 
 def _encode_text_queries(
-    queries: list[str],
+    queries: tuple[str, ...],
     *,
     tokenizer: Any,
     text_model: CLIPTextModel,
     device: torch.device,
 ) -> torch.Tensor:
-    text_inputs = tokenizer(
-        queries,
-        padding=True,
-        truncation=True,
-        return_tensors="pt",
+    with torch.inference_mode():
+        text_inputs = tokenizer(
+            queries,
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+        )
+        text_inputs = {key: value.to(device) for key, value in text_inputs.items()}
+        text_embeddings = text_model(**text_inputs)
+        return F.normalize(text_embeddings, dim=-1)
+
+
+@lru_cache(maxsize=16)
+def _load_text_embeddings(
+    clip_model_name: str,
+    device_key: str,
+    clip_dtype_key: str,
+    queries: tuple[str, ...],
+) -> torch.Tensor:
+    _, tokenizer, _, text_model = _load_maskclip_components(
+        clip_model_name,
+        device_key,
+        clip_dtype_key,
     )
-    text_inputs = {
-        key: value.to(device)
-        for key, value in text_inputs.items()
-    }
-    text_embeddings = text_model(**text_inputs)
-    return F.normalize(text_embeddings, dim=-1)
+    return _encode_text_queries(
+        queries,
+        tokenizer=tokenizer,
+        text_model=text_model,
+        device=torch.device(device_key),
+    )
+
+
+def _prepare_frame_arrays(frames: torch.Tensor) -> list[Any]:
+    frames_cpu = frames.detach()
+    if frames_cpu.device.type != "cpu":
+        frames_cpu = frames_cpu.cpu()
+    if not frames_cpu.is_contiguous():
+        frames_cpu = frames_cpu.contiguous()
+    return list(frames_cpu.numpy())
 
 
 def _aggregate_query_scores(
@@ -259,11 +315,11 @@ def _aggregate_query_scores(
 
 
 def _compute_dense_patch_score_maps(
-    frames: torch.Tensor,
+    frame_arrays: list[Any],
     *,
     image_processor: CLIPImageProcessor,
     vision_model: CLIPVisionModel,
-    text_embeddings: torch.Tensor,
+    text_embeddings_t: torch.Tensor,
     aggregation: str,
     batch_size: int,
     device: torch.device,
@@ -277,23 +333,24 @@ def _compute_dense_patch_score_maps(
     patch_size = int(vision_model.config.patch_size)
 
     with torch.inference_mode():
-        for start in range(0, int(frames.shape[0]), batch_size):
-            batch_frames = [
-                frame.detach().cpu().numpy()
-                for frame in frames[start : start + batch_size]
-            ]
+        for start in range(0, len(frame_arrays), batch_size):
+            batch_frames = frame_arrays[start : start + batch_size]
             pixel_values = image_processor(
                 images=batch_frames,
                 return_tensors="pt",
             )["pixel_values"]
             if clip_dtype is None:
-                pixel_values = pixel_values.to(device=device)
+                pixel_values = pixel_values.to(device=device, non_blocking=True)
             else:
-                pixel_values = pixel_values.to(device=device, dtype=clip_dtype)
+                pixel_values = pixel_values.to(
+                    device=device,
+                    dtype=clip_dtype,
+                    non_blocking=True,
+                )
 
             patch_embeddings = vision_model(pixel_values)
             patch_embeddings = F.normalize(patch_embeddings, dim=-1)
-            patch_scores = patch_embeddings @ text_embeddings.T
+            patch_scores = patch_embeddings @ text_embeddings_t
             patch_scores = _aggregate_query_scores(
                 patch_scores,
                 aggregation=aggregation,
@@ -374,6 +431,29 @@ def _resize_score_maps(
     ).squeeze(1)
 
 
+def _compute_qwen_merge_mean_scores(
+    raw_score_maps: torch.Tensor,
+    *,
+    merge_size: int,
+) -> torch.Tensor:
+    if merge_size <= 0:
+        raise ValueError(f"`spatial_merge_size` must be positive, got {merge_size}.")
+
+    raw_height = int(raw_score_maps.shape[-2])
+    raw_width = int(raw_score_maps.shape[-1])
+    if raw_height % merge_size != 0 or raw_width % merge_size != 0:
+        raise ValueError(
+            "Raw Qwen spatial grid must be divisible by spatial_merge_size: "
+            f"grid=({raw_height}, {raw_width}), merge_size={merge_size}."
+        )
+
+    return F.avg_pool2d(
+        raw_score_maps.unsqueeze(1),
+        kernel_size=merge_size,
+        stride=merge_size,
+    ).squeeze(1)
+
+
 def _compute_window_score_maps(
     raw_score_maps: torch.Tensor,
     *,
@@ -397,7 +477,7 @@ def _compute_window_score_maps(
     ).squeeze(1)
 
 
-def _compute_merged_token_scores(
+def _compute_sliding_window_merged_scores(
     window_score_maps: torch.Tensor,
     *,
     raw_height: int,
@@ -412,8 +492,6 @@ def _compute_merged_token_scores(
             f"grid=({raw_height}, {raw_width}), merge_size={merge_size}."
         )
 
-    # Distribute each sliding-window score back onto the raw grid over the
-    # window's covered area, then pool raw-grid sums/counts into merge blocks.
     window_scores = window_score_maps.unsqueeze(1)
     overlap_kernel = window_scores.new_ones((1, 1, window_size, window_size))
     raw_score_sums = F.conv_transpose2d(
@@ -506,7 +584,7 @@ def _select_topk_per_frame(
     return selected_indices, frame_metadata
 
 
-def maskclip_sliding_window_patch_selection(
+def maskclip_patch_selection(
     video_features: torch.Tensor,
     *,
     frame_selection: FrameSelectionResult,
@@ -518,6 +596,7 @@ def maskclip_sliding_window_patch_selection(
     clip_model_name: str = "openai/clip-vit-base-patch16",
     clip_dtype: str | torch.dtype | None = None,
     keep_ratio: float = 0.5,
+    selection_mode: str = "merge",
     window_size: int = 2,
     window_stride: int = 1,
     batch_size: int = 8,
@@ -528,10 +607,11 @@ def maskclip_sliding_window_patch_selection(
 ) -> PatchSelectionResult:
     if backend not in SUPPORTED_QWEN_BACKENDS:
         raise ValueError(
-            "MaskCLIP sliding-window patch selection currently supports only Qwen backends, "
+            "MaskCLIP patch selection currently supports only Qwen backends, "
             f"got `{backend}`."
         )
 
+    resolved_selection_mode = _resolve_selection_mode(selection_mode)
     frames = _coerce_video_frames(frame_selection)
     frame_count = int(frames.shape[0])
     grid_t, raw_grid_h, raw_grid_w = _extract_video_grid(
@@ -554,25 +634,27 @@ def maskclip_sliding_window_patch_selection(
     )
 
     selector_device = _resolve_device(device, video_features)
+    selector_device_key = _resolve_device_key(selector_device)
     resolved_clip_dtype, clip_dtype_key = _resolve_clip_dtype(clip_dtype)
     queries = _load_queries(query_file)
-    image_processor, tokenizer, vision_model, text_model = _load_maskclip_components(
+    image_processor, _, vision_model, _ = _load_maskclip_components(
         clip_model_name,
-        selector_device.type if selector_device.index is None else str(selector_device),
+        selector_device_key,
         clip_dtype_key,
     )
 
-    text_embeddings = _encode_text_queries(
+    text_embeddings = _load_text_embeddings(
+        clip_model_name,
+        selector_device_key,
+        clip_dtype_key,
         queries,
-        tokenizer=tokenizer,
-        text_model=text_model,
-        device=selector_device,
     )
+    frame_arrays = _prepare_frame_arrays(frames)
     dense_score_maps, clip_grid = _compute_dense_patch_score_maps(
-        frames,
+        frame_arrays,
         image_processor=image_processor,
         vision_model=vision_model,
-        text_embeddings=text_embeddings,
+        text_embeddings_t=text_embeddings.transpose(0, 1).contiguous(),
         aggregation=aggregation,
         batch_size=batch_size,
         device=selector_device,
@@ -588,19 +670,31 @@ def maskclip_sliding_window_patch_selection(
         grid_t=grid_t,
         temporal_patch_size=temporal_patch_size,
     )
-    window_score_maps = _compute_window_score_maps(
-        raw_score_maps,
-        window_size=window_size,
-        window_stride=window_stride,
-    )
-    merged_scores = _compute_merged_token_scores(
-        window_score_maps,
-        raw_height=raw_grid_h,
-        raw_width=raw_grid_w,
-        merge_size=merge_size,
-        window_size=window_size,
-        window_stride=window_stride,
-    )
+
+    mode_metadata: dict[str, Any] = {}
+    if resolved_selection_mode == "merge":
+        merged_scores = _compute_qwen_merge_mean_scores(
+            raw_score_maps,
+            merge_size=merge_size,
+        )
+        mode_metadata["score_reduction"] = "mean_within_qwen_merge_unit"
+    else:
+        window_score_maps = _compute_window_score_maps(
+            raw_score_maps,
+            window_size=window_size,
+            window_stride=window_stride,
+        )
+        merged_scores = _compute_sliding_window_merged_scores(
+            window_score_maps,
+            raw_height=raw_grid_h,
+            raw_width=raw_grid_w,
+            merge_size=merge_size,
+            window_size=window_size,
+            window_stride=window_stride,
+        )
+        mode_metadata["window_size"] = int(window_size)
+        mode_metadata["window_stride"] = int(window_stride)
+
     selected_indices, frame_metadata = _select_topk_per_frame(
         merged_scores,
         keep_ratio=keep_ratio,
@@ -618,16 +712,15 @@ def maskclip_sliding_window_patch_selection(
         dtype=torch.long,
     )
     metadata = {
-        "selector_type": "maskclip_sliding_window_patch_selection",
+        "selector_type": "maskclip_patch_selection",
+        "selection_mode": resolved_selection_mode,
         "clip_model_name": clip_model_name,
         "clip_dtype": clip_dtype_key,
         "query_file": str(Path(query_file).expanduser()),
-        "queries": queries,
+        "queries": list(queries),
         "query_count": len(queries),
         "aggregation": aggregation,
         "keep_ratio": float(keep_ratio),
-        "window_size": int(window_size),
-        "window_stride": int(window_stride),
         "spatial_merge_size": merge_size,
         "temporal_patch_size": temporal_patch_size,
         "frame_count": frame_count,
@@ -642,6 +735,7 @@ def maskclip_sliding_window_patch_selection(
         "selected_token_count": int(selected_indices.numel()),
         "video_token_count": expected_tokens,
         "per_frame": frame_metadata,
+        **mode_metadata,
     }
     return PatchSelectionResult(
         selected_indices=selected_indices,
@@ -649,6 +743,4 @@ def maskclip_sliding_window_patch_selection(
     )
 
 
-maskclip_sliding_window_patch_selection.preload = (
-    preload_maskclip_sliding_window_patch_selection
-)
+maskclip_patch_selection.preload = preload_maskclip_patch_selection
