@@ -14,7 +14,10 @@ from .cilp_model import CLIPTextModel, CLIPVisionModel
 
 
 SUPPORTED_QWEN_BACKENDS = {"qwen2_vl", "qwen2_5_vl", "qwen3_vl"}
-SUPPORTED_SELECTION_MODES = {"merge", "sliding_window"}
+SUPPORTED_SELECTION_MODES = {"naive_mean", "sliding_window"}
+SELECTION_MODE_ALIASES = {
+    "merge": "naive_mean",
+}
 CLIP_DTYPE_MAP = {
     "bf16": torch.bfloat16,
     "fp16": torch.float16,
@@ -67,6 +70,7 @@ def _resolve_clip_dtype(
 
 def _resolve_selection_mode(selection_mode: str) -> str:
     normalized = str(selection_mode).strip().lower()
+    normalized = SELECTION_MODE_ALIASES.get(normalized, normalized)
     if normalized not in SUPPORTED_SELECTION_MODES:
         available = ", ".join(sorted(SUPPORTED_SELECTION_MODES))
         raise ValueError(
@@ -596,7 +600,7 @@ def maskclip_patch_selection(
     clip_model_name: str = "openai/clip-vit-base-patch16",
     clip_dtype: str | torch.dtype | None = None,
     keep_ratio: float = 0.5,
-    selection_mode: str = "merge",
+    selection_mode: str = "naive_mean",
     window_size: int = 2,
     window_stride: int = 1,
     batch_size: int = 8,
@@ -672,7 +676,7 @@ def maskclip_patch_selection(
     )
 
     mode_metadata: dict[str, Any] = {}
-    if resolved_selection_mode == "merge":
+    if resolved_selection_mode == "naive_mean":
         merged_scores = _compute_qwen_merge_mean_scores(
             raw_score_maps,
             merge_size=merge_size,
