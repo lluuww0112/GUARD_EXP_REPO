@@ -10,4 +10,4 @@ safetensors==0.7.0
 torch==2.8.0
 transformers==5.3.0
 yt-dlp==2026.3.17
-torchvision==0.26.0
+torchvision==0.23.0 # 0.26.0이 코랩에서는 되는데 pip로 설치할 때 의존성 문제가 있다. 플랫폼 차이인 듯 

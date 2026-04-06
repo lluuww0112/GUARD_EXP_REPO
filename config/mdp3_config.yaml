@@ -1,0 +1,55 @@
+defaults:
+  - base
+  - _self_
+
+frame_selection:
+  _target_: model.FrameSelection.MDP3.selection.mdp3_sampling
+  _partial_: true
+  num_candidates: 16 # 메모리가 터져서 32로.. 
+  num_frames: 8
+  segment_size: 32
+  lam: 0.2
+  alphas: [0.125, 0.25, 1.0, 2.0, 4.0]
+  max_side: 720
+  ensure_qwen_compatibility: true
+  qwen_factor: 28
+
+patch_selection: null
+
+vlm:
+  _target_: model.FrameSelection.MDP3.vlm.MDP3VLM
+  model_id: "Qwen/Qwen3-VL-8B-Instruct"
+  backend: "qwen3_vl"
+  dtype: "bf16"
+  quantization:
+    enabled: true
+    mode: "4bit"
+    skip_vision_encoder: true
+    skip_modules: []
+    kwargs:
+      bnb_4bit_compute_dtype: "bf16"
+      bnb_4bit_quant_type: "nf4"
+      bnb_4bit_use_double_quant: true
+      llm_int8_threshold: 6.0
+      llm_int8_enable_fp32_cpu_offload: false
+  frame_selector: ${frame_selection}
+  patch_selector: ${patch_selection}
+  processor_kwargs: {}
+  model_kwargs: {}
+  local_model_dir: "./model/repo"
+  generation_kwargs:
+    do_sample: true
+    top_p: 0.8
+    max_new_tokens: 256
+  embedding_model_id: "google/siglip-so400m-patch14-384"
+  embedding_dtype: "bf16"
+  embedding_processor_kwargs: {}
+  embedding_model_kwargs: {}
+  embedding_local_model_dir: "./model/repo"
+
+invoke:
+  video_path: "./data/fcN5HGqVzC0.mp4"
+  prompt_file: "model/base/prompt.txt"
+  query_file: "model/base/query.txt"
+  print_config: false
+  quiet_model_loading: false
