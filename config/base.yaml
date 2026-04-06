@@ -26,7 +26,7 @@ vlm:
   backend: "qwen3_vl" # 현재 프로젝트의 기준 VLM 백엔드
   dtype: "bf16" # Enum[ bf16 | fp16 | fp32 ]
   quantization:
-    enabled: true # true면 bitsandbytes 양자화 활성화 (CUDA 필요)
+    enabled: false # true면 bitsandbytes 양자화 활성화 (CUDA 필요)
     mode: "4bit" # 4bit는 메모리 절감, 8bit는 정확도/안정성에 더 유리한 편
     skip_vision_encoder: true # vision encoder는 성능 저하 방지를 위해 기본적으로 제외
     skip_modules: [] # 추가 제외 모듈명 리스트 (예: ["multi_modal_projector"])
