@@ -13,9 +13,7 @@ from typing import Any, Callable, TypeVar
 
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
-DEFAULT_TOKEN_PATH = (
-    Path.home() / ".config" / "guard_exp_repo" / "google_drive_token.json"
-)
+DEFAULT_TOKEN_PATH = Path(__file__).resolve().parent / "google_drive_token.json"
 FIXED_EXCLUDE_PATTERNS = (
     ".git/",
     "__pycache__/",

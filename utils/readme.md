@@ -51,7 +51,7 @@ pip install -r requirements.launch.txt
 기본 토큰 저장 위치는 다음입니다.
 
 ```text
-~/.config/guard_exp_repo/google_drive_token.json
+./utils/google_drive_token.json
 ```
 
 첫 실행에서 브라우저 로그인이 열리고, 이후에는 저장된 토큰을 자동 재사용합니다.
