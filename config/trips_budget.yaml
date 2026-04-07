@@ -12,32 +12,26 @@ hydra:
 frame_selection:
   _target_: model.base.uniform_sampling
   _partial_: true
-  # Keep frame sampling aligned with base.yaml for a fair base-vs-TRIPS comparison.
   num_frames: 10
   max_side: 720
   ensure_qwen_compatibility: true
 
 patch_selection:
-  _target_: model.PatchSelection.trips_selection.trips_patch_selection
+  _target_: model.PatchSelection.trips_budget_selection.budget_fuse_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
   clip_model_name: "openai/clip-vit-base-patch16"
   clip_dtype: "bf16"
-  # Prioritize LLM Tok/s by keeping very few attentive tokens.
-  keep_ratio: 0.03
-  attentive_budget: null
-  max_attentive_budget: 4
-  patch_score_threshold: null
-  patch_score_threshold_low: 0.01
-  patch_score_threshold_high: 0.06
-  score_pooling: "naive_mean"
+  total_budget: null
+  keep_ratio: 0.05
+  temperature: 0.4
+  selection_mode: "naive_mean"
   window_size: 4
   window_stride: 2
   aggregation: "max"
   batch_size: ${frame_selection.num_frames}
   spatial_merge_size: null
   fuse_strategy: "mean"
-  fuse_scope: "global"
   device: null
 
 vlm:

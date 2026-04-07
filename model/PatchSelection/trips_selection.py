@@ -555,6 +555,38 @@ def _build_fused_token(
     )
 
 
+def _resolve_fuse_scope(fuse_scope: str) -> str:
+    normalized = str(fuse_scope).strip().lower()
+    if normalized not in {"global", "framewise"}:
+        raise ValueError(
+            f"Unsupported `fuse_scope`: {fuse_scope}. Available: global, framewise."
+        )
+    return normalized
+
+
+def _resolve_two_stage_thresholds(
+    *,
+    low_threshold: float | None,
+    high_threshold: float | None,
+) -> tuple[float | None, float | None]:
+    if low_threshold is None and high_threshold is None:
+        return None, None
+    if low_threshold is None or high_threshold is None:
+        raise ValueError(
+            "Set both `patch_score_threshold_low` and `patch_score_threshold_high`, "
+            "or leave both unset."
+        )
+
+    resolved_low = float(low_threshold)
+    resolved_high = float(high_threshold)
+    if resolved_high < resolved_low:
+        raise ValueError(
+            "`patch_score_threshold_high` must be greater than or equal to "
+            "`patch_score_threshold_low`."
+        )
+    return resolved_low, resolved_high
+
+
 def trips_patch_selection(
     video_features: torch.Tensor,
     *,
@@ -570,6 +602,8 @@ def trips_patch_selection(
     attentive_budget: int | None = None,
     max_attentive_budget: int | None = None,
     patch_score_threshold: float | None = None,
+    patch_score_threshold_low: float | None = None,
+    patch_score_threshold_high: float | None = None,
     aggregation: str = "max",
     score_pooling: str = "naive_mean",
     window_size: int = 4,
@@ -577,6 +611,7 @@ def trips_patch_selection(
     batch_size: int = 8,
     spatial_merge_size: int | None = None,
     fuse_strategy: str = "score_weighted_mean",
+    fuse_scope: str = "global",
     device: str | torch.device | None = None,
     **_: Any,
 ) -> PatchSelectionResult:
@@ -594,6 +629,11 @@ def trips_patch_selection(
 
     resolved_aggregation = _resolve_query_aggregation(aggregation)
     resolved_score_pooling = _resolve_score_pooling(score_pooling)
+    resolved_fuse_scope = _resolve_fuse_scope(fuse_scope)
+    resolved_low_threshold, resolved_high_threshold = _resolve_two_stage_thresholds(
+        low_threshold=patch_score_threshold_low,
+        high_threshold=patch_score_threshold_high,
+    )
     frames = _coerce_video_frames(frame_selection)
     frame_count = int(frames.shape[0])
     grid_t, raw_grid_h, raw_grid_w = _extract_video_grid(
@@ -684,31 +724,76 @@ def trips_patch_selection(
         attentive_budget=attentive_budget,
         max_attentive_budget=max_attentive_budget,
     )
-    eligible_mask = torch.ones_like(flat_scores, dtype=torch.bool)
-    if patch_score_threshold is not None:
-        eligible_mask = flat_scores >= float(patch_score_threshold)
+    effective_attentive_budget = resolved_attentive_budget
+    if resolved_low_threshold is not None and resolved_high_threshold is not None:
+        high_conf_mask = flat_scores >= resolved_high_threshold
+        eligible_mask = flat_scores >= resolved_low_threshold
+        high_conf_indices = torch.nonzero(high_conf_mask, as_tuple=False).flatten()
+        eligible_indices = torch.nonzero(eligible_mask, as_tuple=False).flatten()
+        eligible_token_count = int(eligible_indices.numel())
+        high_conf_token_count = int(high_conf_indices.numel())
 
-    eligible_indices = torch.nonzero(eligible_mask, as_tuple=False).flatten()
-    eligible_token_count = int(eligible_indices.numel())
-    effective_attentive_budget = min(resolved_attentive_budget, eligible_token_count)
+        if high_conf_token_count >= effective_attentive_budget:
+            high_conf_scores = flat_scores[high_conf_indices]
+            attentive_indices = high_conf_indices[
+                torch.topk(
+                    high_conf_scores,
+                    k=effective_attentive_budget,
+                    dim=0,
+                    largest=True,
+                    sorted=False,
+                ).indices
+            ]
+        else:
+            remaining_budget = effective_attentive_budget - high_conf_token_count
+            mid_conf_mask = eligible_mask & ~high_conf_mask
+            mid_conf_indices = torch.nonzero(mid_conf_mask, as_tuple=False).flatten()
+            mid_conf_take = min(remaining_budget, int(mid_conf_indices.numel()))
+            if mid_conf_take > 0:
+                mid_conf_scores = flat_scores[mid_conf_indices]
+                selected_mid_indices = mid_conf_indices[
+                    torch.topk(
+                        mid_conf_scores,
+                        k=mid_conf_take,
+                        dim=0,
+                        largest=True,
+                        sorted=False,
+                    ).indices
+                ]
+                attentive_indices = torch.cat(
+                    [high_conf_indices, selected_mid_indices],
+                    dim=0,
+                )
+            else:
+                attentive_indices = high_conf_indices
 
-    if effective_attentive_budget > 0:
-        eligible_scores = flat_scores[eligible_indices]
-        attentive_indices = eligible_indices[
-            torch.topk(
-                eligible_scores,
-                k=effective_attentive_budget,
-                dim=0,
-                largest=True,
-                sorted=False,
-            ).indices
-        ]
+            effective_attentive_budget = int(attentive_indices.numel())
     else:
-        attentive_indices = torch.empty(
-            0,
-            device=flat_scores.device,
-            dtype=torch.long,
-        )
+        eligible_mask = torch.ones_like(flat_scores, dtype=torch.bool)
+        if patch_score_threshold is not None:
+            eligible_mask = flat_scores >= float(patch_score_threshold)
+
+        eligible_indices = torch.nonzero(eligible_mask, as_tuple=False).flatten()
+        eligible_token_count = int(eligible_indices.numel())
+        effective_attentive_budget = min(resolved_attentive_budget, eligible_token_count)
+
+        if effective_attentive_budget > 0:
+            eligible_scores = flat_scores[eligible_indices]
+            attentive_indices = eligible_indices[
+                torch.topk(
+                    eligible_scores,
+                    k=effective_attentive_budget,
+                    dim=0,
+                    largest=True,
+                    sorted=False,
+                ).indices
+            ]
+        else:
+            attentive_indices = torch.empty(
+                0,
+                device=flat_scores.device,
+                dtype=torch.long,
+            )
 
     attentive_mask = torch.zeros_like(flat_scores, dtype=torch.bool)
     attentive_mask[attentive_indices] = True
@@ -717,18 +802,53 @@ def trips_patch_selection(
     if int(inattentive_indices.numel()) == 0:
         raise RuntimeError("TRIPS expected inattentive tokens to fuse, but none remained.")
 
-    fused_anchor_index = int(inattentive_indices[0].item())
-    fused_feature = _build_fused_token(
-        inattentive_features=video_features[inattentive_indices.to(video_features.device)],
-        inattentive_scores=flat_scores[inattentive_indices].to(video_features.device),
-        fuse_strategy=fuse_strategy,
-    )
+    fused_anchor_indices: list[int] = []
+    fused_feature_map: dict[int, torch.Tensor] = {}
+    framewise_fused_metadata: list[dict[str, Any]] = []
+    if resolved_fuse_scope == "global":
+        fused_anchor_index = int(inattentive_indices[0].item())
+        fused_feature_map[fused_anchor_index] = _build_fused_token(
+            inattentive_features=video_features[
+                inattentive_indices.to(video_features.device)
+            ],
+            inattentive_scores=flat_scores[inattentive_indices].to(video_features.device),
+            fuse_strategy=fuse_strategy,
+        )
+        fused_anchor_indices.append(fused_anchor_index)
+    else:
+        tokens_per_frame = (raw_grid_h // merge_size) * (raw_grid_w // merge_size)
+        for frame_idx in range(grid_t):
+            frame_start = frame_idx * tokens_per_frame
+            frame_end = frame_start + tokens_per_frame
+            frame_mask = (inattentive_indices >= frame_start) & (inattentive_indices < frame_end)
+            frame_inattentive_indices = inattentive_indices[frame_mask]
+            if int(frame_inattentive_indices.numel()) == 0:
+                continue
+
+            fused_anchor_index = int(frame_inattentive_indices[0].item())
+            fused_feature_map[fused_anchor_index] = _build_fused_token(
+                inattentive_features=video_features[
+                    frame_inattentive_indices.to(video_features.device)
+                ],
+                inattentive_scores=flat_scores[frame_inattentive_indices].to(
+                    video_features.device
+                ),
+                fuse_strategy=fuse_strategy,
+            )
+            fused_anchor_indices.append(fused_anchor_index)
+            framewise_fused_metadata.append(
+                {
+                    "frame_index": int(frame_idx),
+                    "fused_anchor_index": fused_anchor_index,
+                    "inattentive_token_count": int(frame_inattentive_indices.numel()),
+                }
+            )
 
     selected_indices = torch.cat(
         [
             attentive_indices.to(video_features.device, dtype=torch.long),
             torch.tensor(
-                [fused_anchor_index],
+                fused_anchor_indices,
                 device=video_features.device,
                 dtype=torch.long,
             ),
@@ -740,8 +860,8 @@ def trips_patch_selection(
 
     feature_rows: list[torch.Tensor] = []
     for index in selected_indices.detach().cpu().tolist():
-        if int(index) == fused_anchor_index:
-            feature_rows.append(fused_feature)
+        if int(index) in fused_feature_map:
+            feature_rows.append(fused_feature_map[int(index)])
         else:
             feature_rows.append(video_features[int(index)].unsqueeze(0))
     selected_features = torch.cat(feature_rows, dim=0)
@@ -777,13 +897,15 @@ def trips_patch_selection(
         "patch_score_threshold": (
             float(patch_score_threshold) if patch_score_threshold is not None else None
         ),
+        "patch_score_threshold_low": resolved_low_threshold,
+        "patch_score_threshold_high": resolved_high_threshold,
         "eligible_token_count": eligible_token_count,
-        "fused_token_count": 1,
+        "fused_token_count": len(fused_anchor_indices),
         "selected_token_count": int(selected_indices.numel()),
         "video_token_count": expected_tokens,
         "inattentive_token_count": int(inattentive_indices.numel()),
-        "fused_anchor_index": fused_anchor_index,
         "fuse_strategy": str(fuse_strategy).strip().lower(),
+        "fuse_scope": resolved_fuse_scope,
         "spatial_merge_size": merge_size,
         "temporal_patch_size": temporal_patch_size,
         "frame_count": frame_count,
@@ -802,10 +924,15 @@ def trips_patch_selection(
         "inattentive_indices_preview": [
             int(index) for index in inattentive_indices[:16].detach().cpu().tolist()
         ],
+        "fused_anchor_indices": [int(index) for index in fused_anchor_indices],
         "attentive_score_min": attentive_score_min,
         "attentive_score_max": attentive_score_max,
         "fused_score_mean": float(fused_score.item()),
     }
+    if resolved_fuse_scope == "global":
+        metadata["fused_anchor_index"] = fused_anchor_indices[0]
+    else:
+        metadata["framewise_fused"] = framewise_fused_metadata
     if resolved_score_pooling == "sliding_window":
         metadata["window_size"] = int(window_size)
         metadata["window_stride"] = int(window_stride)

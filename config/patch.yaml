@@ -77,7 +77,7 @@ vlm:
   backend: "qwen3_vl"
   dtype: "bf16"
   quantization:
-    enabled: false
+    enabled: true
     mode: "4bit"
     skip_vision_encoder: true
     skip_modules: []

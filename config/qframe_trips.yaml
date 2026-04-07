@@ -39,6 +39,7 @@ patch_selection:
   batch_size: ${frame_selection.num_frames}
   spatial_merge_size: null
   fuse_strategy: "mean"
+  fuse_scope: "framewise"
   device: null
 
 vlm:
