@@ -167,28 +167,26 @@ def _sample_candidate_frames(
         .astype(int)
         .tolist()
     )
-    target_set = set(candidate_indices)
-    frame_idx = 0
     sampled_indices: list[int] = []
     frames: list[np.ndarray] = []
 
     try:
-        while True:
+        for candidate_idx in candidate_indices:
+            if not cap.set(cv2.CAP_PROP_POS_FRAMES, int(candidate_idx)):
+                continue
             ok, frame_bgr = cap.read()
             if not ok:
-                break
+                continue
 
-            if frame_idx in target_set:
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                frame_rgb = _resize_frame(
-                    frame_rgb,
-                    max_side=max_side,
-                    ensure_qwen_compatibility=ensure_qwen_compatibility,
-                    qwen_factor=qwen_factor,
-                )
-                frames.append(frame_rgb)
-                sampled_indices.append(frame_idx)
-            frame_idx += 1
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            frame_rgb = _resize_frame(
+                frame_rgb,
+                max_side=max_side,
+                ensure_qwen_compatibility=ensure_qwen_compatibility,
+                qwen_factor=qwen_factor,
+            )
+            frames.append(frame_rgb)
+            sampled_indices.append(int(candidate_idx))
     finally:
         cap.release()
         if transcoded_path is not None:
