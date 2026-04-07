@@ -14,6 +14,7 @@ paper-style MDP3 selector as a standard frame-selection function.
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Callable
 
 import torch
@@ -308,6 +309,7 @@ def mdp3_sampling(
     num_candidates: int = 128,
     embed_fn: EmbeddingFunction | None = None,
     query: str = "",
+    query_file: str | None = None,
     segment_size: int = 32,
     lam: float = 0.2,
     alphas: list[float] | None = None,
@@ -330,6 +332,15 @@ def mdp3_sampling(
     if num_candidates <= 0:
         raise ValueError(f"`num_candidates` must be positive, got {num_candidates}.")
 
+    query_text = query.strip()
+    if not query_text and query_file:
+        query_path = Path(query_file).expanduser()
+        if not query_path.exists():
+            raise FileNotFoundError(f"Query file not found: {query_path}")
+        query_text = query_path.read_text(encoding="utf-8").strip()
+    if not query_text:
+        raise ValueError("`query` or `query_file` must provide a non-empty query.")
+
     candidates = uniform_sampling(
         video_path=video_path,
         num_frames=num_candidates,
@@ -338,7 +349,7 @@ def mdp3_sampling(
         qwen_factor=qwen_factor,
     )
 
-    frame_embeds, query_embed = embed_fn(candidates.frames, query)
+    frame_embeds, query_embed = embed_fn(candidates.frames, query_text)
 
     # CLIP/SigLIP-style embeddings are compared in normalized space.
     frame_embeds = torch.nn.functional.normalize(frame_embeds, dim=-1)
@@ -371,6 +382,7 @@ def mdp3_sampling(
                 "lambda": lam,
                 "alphas": alphas or DEFAULT_ALPHAS,
             },
+            "query_text": query_text,
         },
     )
 

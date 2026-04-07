@@ -5,6 +5,7 @@ defaults:
 frame_selection:
   _target_: model.FrameSelection.MDP3.selection.mdp3_sampling
   _partial_: true
+  query_file: ${invoke.query_file}
   num_candidates: 16 # 메모리가 터져서 32로.. 
   num_frames: 8
   segment_size: 32

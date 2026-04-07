@@ -166,12 +166,14 @@ class MDP3VLM(BaseVLM):
         if self.frame_selector is None:
             return super().answer(video_path=video_path, prompt=prompt, **frame_selector_kwargs)
 
-        _, user_prompt = self._normalize_prompt_input(prompt)
+        raw_query = ""
+        if isinstance(prompt, dict):
+            raw_query = str(prompt.get("query", "") or "").strip()
         selector_kwargs = {
             **self.frame_selector_kwargs,
             **frame_selector_kwargs,
             "embed_fn": self._embed_for_mdp3,
-            "query": user_prompt,
+            "query": raw_query,
         }
         frame_selection = self._normalize_frame_selection_output(
             self.frame_selector(video_path=video_path, **selector_kwargs),
