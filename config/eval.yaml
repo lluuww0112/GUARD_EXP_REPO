@@ -1,0 +1,20 @@
+hydra:
+  job:
+    chdir: false
+  output_subdir: null
+  run:
+    dir: .
+
+experiment: "base"
+
+egoschema:
+  dataset_root: "../../EgoSchema"
+  questions_file: null
+  uid_map_file: null
+  videos_dir: null
+  output_dir: "./eval/result"
+  output_file: "ego_pred.jsonl"
+  resume: true
+  progress_interval: 10
+  start_index: 0
+  limit: null
