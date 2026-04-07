@@ -124,7 +124,7 @@ class BaseVLM(VLMInterface):
         model_id: str,
         frame_selector: FrameSelector,
         patch_selector: PatchSelector | None = None,
-        backend: str = "qwen2_5_vl",
+        backend: str = "qwen3_vl",
         processor_kwargs: dict[str, Any] | None = None,
         model_kwargs: dict[str, Any] | None = None,
         generation_kwargs: dict[str, Any] | None = None,
