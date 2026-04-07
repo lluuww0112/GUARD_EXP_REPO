@@ -1,0 +1,14 @@
+hydra:
+  job:
+    chdir: false
+  output_subdir: null
+  run:
+    dir: .
+
+print_config: false
+
+egoschema_val:
+  input_file: "./eval/result/ego_pred.jsonl"
+  url: "https://validation-server.onrender.com/api/upload/"
+  timeout: 120
+  dry_run: false
