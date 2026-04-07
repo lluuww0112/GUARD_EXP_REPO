@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from ..base.selection import FrameSelectionResult, PatchSelectionResult
+from ...base.selection import FrameSelectionResult, PatchSelectionResult
 from .selection_v1 import (
     _align_temporal_score_maps,
     _coerce_video_frames,
