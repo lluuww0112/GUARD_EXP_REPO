@@ -413,16 +413,22 @@ def _render_prompt(
     }
 
 
-def _configure_dynamic_query_file(vlm: Any, query_file_path: Path) -> bool:
-    patch_selector = getattr(vlm, "patch_selector", None)
-    if patch_selector is None:
-        return False
+def _configure_dynamic_query_file(vlm: Any, query_file_path: Path) -> tuple[bool, tuple[str, ...]]:
+    updated_targets: list[str] = []
+    target_specs = (
+        ("frame_selector", getattr(vlm, "frame_selector", None)),
+        ("patch_selector", getattr(vlm, "patch_selector", None)),
+    )
 
-    keywords = getattr(patch_selector, "keywords", None)
-    if isinstance(keywords, dict) and "query_file" in keywords:
-        keywords["query_file"] = str(query_file_path)
-        return True
-    return False
+    for target_name, target in target_specs:
+        if target is None:
+            continue
+        keywords = getattr(target, "keywords", None)
+        if isinstance(keywords, dict) and "query_file" in keywords:
+            keywords["query_file"] = str(query_file_path)
+            updated_targets.append(target_name)
+
+    return bool(updated_targets), tuple(updated_targets)
 
 
 def _parse_prediction_index(
@@ -603,12 +609,13 @@ def main(config: DictConfig) -> None:
     temp_dir = tempfile.TemporaryDirectory(prefix="egoschema_query_")
     try:
         dynamic_query_file = Path(temp_dir.name) / "query.txt"
-        dynamic_query_enabled = _configure_dynamic_query_file(vlm, dynamic_query_file)
-        if getattr(vlm, "patch_selector", None) is not None:
+        dynamic_query_enabled, dynamic_query_targets = _configure_dynamic_query_file(vlm, dynamic_query_file)
+        if getattr(vlm, "frame_selector", None) is not None or getattr(vlm, "patch_selector", None) is not None:
             if dynamic_query_enabled:
-                print(f"Dynamic Query: {dynamic_query_file}")
+                target_list = ", ".join(dynamic_query_targets)
+                print(f"Dynamic Query: {dynamic_query_file} -> {target_list}")
             else:
-                print("Dynamic Query: patch selector is active, but `query_file` could not be updated dynamically.")
+                print("Dynamic Query: no selector exposes a dynamic `query_file` to update.")
             print()
         preload_runtime_resources = getattr(vlm, "preload_runtime_resources", None)
         preloaded = False
