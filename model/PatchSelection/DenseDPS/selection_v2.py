@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, CLIPImageProcessor
 
-from ..base.selection import FrameSelectionResult, PatchSelectionResult
+from ...base.selection import FrameSelectionResult, PatchSelectionResult
 from .cilp_model import CLIPTextModel, CLIPVisionModel_v2
 from .selection_v1 import (
     _aggregate_query_scores,
