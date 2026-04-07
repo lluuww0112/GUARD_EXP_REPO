@@ -19,11 +19,11 @@ from hydra.utils import to_absolute_path
 from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 
-from model.invoke import build_vlm, summarize_config, suppress_model_loading_output
+from model.invoke import build_vlm, suppress_model_loading_output
 
 
 QUESTION_FILE_CANDIDATES = ("question.json", "questions.json")
-UID_MAP_FILE_CANDIDATES = ("uid_to_ego4d.json",)
+UID_MAP_FILE_CANDIDATES = ("uid_to_ego4d.json", "uid_to_url.json")
 VIDEO_DIR_CANDIDATES = (
     "EgoSchema_videos",
     "Egochema_videos",
@@ -33,6 +33,7 @@ VIDEO_DIR_CANDIDATES = (
 OPTION_KEY_PATTERN = re.compile(r"^option[\s_]*(\d+)$", re.IGNORECASE)
 INDEX_PATTERN = re.compile(r"\b(?:answer|option|choice)?\s*[:#\-]?\s*([0-9])\b", re.IGNORECASE)
 LETTER_PATTERN = re.compile(r"\b(?:answer|option|choice)?\s*[:#\-]?\s*([A-E])\b", re.IGNORECASE)
+VIDEO_UID_FROM_URL_PATTERN = re.compile(r"/([^/?#]+)\.mp4(?:[?#]|$)", re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -166,7 +167,8 @@ def _resolve_dataset_layout(eval_config: DictConfig | None) -> tuple[Path, Path,
         )
     if uid_map_file is None:
         raise FileNotFoundError(
-            "Could not find `uid_to_ego4d.json` in the EgoSchema dataset."
+            "Could not find a supported EgoSchema uid map file in the dataset. "
+            f"Looked for: {UID_MAP_FILE_CANDIDATES}"
         )
 
     videos_dir = _to_abs_path(
@@ -190,6 +192,14 @@ def _resolve_dataset_layout(eval_config: DictConfig | None) -> tuple[Path, Path,
 def _load_json_file(path: Path) -> Any:
     with path.open("r", encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _extract_video_uid_from_url(url: str) -> str | None:
+    match = VIDEO_UID_FROM_URL_PATTERN.search(url.strip())
+    if match is None:
+        return None
+    video_uid = match.group(1).strip()
+    return video_uid or None
 
 
 def _extract_question_items(payload: Any) -> list[dict[str, Any]]:
@@ -264,11 +274,11 @@ def _resolve_video_path(
     uid_metadata: dict[str, Any],
 ) -> Path:
     candidate_stems = [q_uid]
-    for key in ("video_uid", "uid", "google_drive_id"):
+    for key in ("video_uid", "video_id", "uid", "google_drive_id"):
         value = uid_metadata.get(key)
         if value is not None:
             candidate_stems.append(str(value))
-    for key in ("video_uid", "uid", "google_drive_id"):
+    for key in ("video_uid", "video_id", "uid", "google_drive_id"):
         value = raw_item.get(key)
         if value is not None:
             candidate_stems.append(str(value))
@@ -283,6 +293,28 @@ def _resolve_video_path(
     )
 
 
+def _normalize_uid_metadata(uid_metadata_raw: Any) -> dict[str, Any]:
+    if isinstance(uid_metadata_raw, dict):
+        uid_metadata = dict(uid_metadata_raw)
+    elif isinstance(uid_metadata_raw, str):
+        uid_metadata = {"url": uid_metadata_raw}
+    elif uid_metadata_raw is None:
+        uid_metadata = {}
+    else:
+        uid_metadata = {"value": uid_metadata_raw}
+
+    for url_key in ("url", "video_url"):
+        url_value = uid_metadata.get(url_key)
+        if not isinstance(url_value, str):
+            continue
+        video_uid = _extract_video_uid_from_url(url_value)
+        if video_uid is not None:
+            uid_metadata.setdefault("video_uid", video_uid)
+            break
+
+    return uid_metadata
+
+
 def _load_samples(
     *,
     questions_file: Path,
@@ -292,13 +324,12 @@ def _load_samples(
     question_items = _extract_question_items(_load_json_file(questions_file))
     uid_map_payload = _load_json_file(uid_map_file)
     if not isinstance(uid_map_payload, dict):
-        raise TypeError("`uid_to_ego4d.json` must contain a JSON object.")
+        raise TypeError(f"`{uid_map_file.name}` must contain a JSON object.")
 
     samples: list[EgoSchemaSample] = []
     for item in question_items:
         q_uid = _extract_question_uid(item)
-        uid_metadata_raw = uid_map_payload.get(q_uid, {})
-        uid_metadata = dict(uid_metadata_raw) if isinstance(uid_metadata_raw, dict) else {}
+        uid_metadata = _normalize_uid_metadata(uid_map_payload.get(q_uid))
         samples.append(
             EgoSchemaSample(
                 q_uid=q_uid,
@@ -468,39 +499,6 @@ def _format_accuracy(correct: int, labeled_count: int) -> str:
     return f"{(correct / labeled_count):.4f}"
 
 
-def _build_summary(
-    *,
-    dataset_root: Path,
-    questions_file: Path,
-    uid_map_file: Path,
-    videos_dir: Path,
-    output_path: Path,
-    config: DictConfig,
-    attempted: int,
-    completed: int,
-    skipped_existing: int,
-    parse_failures: int,
-    correct: int,
-    labeled_count: int,
-) -> dict[str, Any]:
-    summary = {
-        "dataset_root": str(dataset_root),
-        "questions_file": str(questions_file),
-        "uid_map_file": str(uid_map_file),
-        "videos_dir": str(videos_dir),
-        "predictions_file": str(output_path),
-        "attempted": attempted,
-        "completed": completed,
-        "skipped_existing": skipped_existing,
-        "parse_failures": parse_failures,
-        "labeled_count": labeled_count,
-        "correct": correct,
-        "accuracy": (correct / labeled_count) if labeled_count > 0 else None,
-        "model": summarize_config(config),
-    }
-    return summary
-
-
 @hydra.main(version_base=None, config_path="../config", config_name="eval")
 def main(config: DictConfig) -> None:
     experiment_path = _resolve_experiment_config_path(config.get("experiment"))
@@ -551,11 +549,17 @@ def main(config: DictConfig) -> None:
         raise ValueError("Failed to resolve EgoSchema output directory.")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    output_path = _to_abs_path(
-        str(eval_config.get("output_file")) if eval_config.get("output_file") else None
-    )
-    if output_path is None:
+    output_file_value = str(eval_config.get("output_file")) if eval_config.get("output_file") else None
+    if not output_file_value:
         output_path = output_dir / "predictions.jsonl"
+    else:
+        raw_output_path = Path(output_file_value).expanduser()
+        if raw_output_path.is_absolute():
+            output_path = raw_output_path.resolve()
+        elif raw_output_path.parent == Path("."):
+            output_path = (output_dir / raw_output_path.name).resolve()
+        else:
+            output_path = Path(to_absolute_path(str(raw_output_path))).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     resume = bool(eval_config.get("resume", True))
@@ -681,26 +685,6 @@ def main(config: DictConfig) -> None:
                 )
         progress_bar.close()
 
-        summary = _build_summary(
-            dataset_root=dataset_root,
-            questions_file=questions_file,
-            uid_map_file=uid_map_file,
-            videos_dir=videos_dir,
-            output_path=output_path,
-            config=runtime_config,
-            attempted=attempted,
-            completed=completed,
-            skipped_existing=skipped_existing,
-            parse_failures=parse_failures,
-            correct=correct,
-            labeled_count=labeled_count,
-        )
-        summary_path = output_path.parent / "summary.json"
-        summary_path.write_text(
-            json.dumps(summary, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
         print()
         print("=== EgoSchema Evaluation Summary ===")
         print(f"Attempted    : {attempted}")
@@ -712,7 +696,6 @@ def main(config: DictConfig) -> None:
             print(f"Accuracy     : {correct / labeled_count:.4f}")
         else:
             print("Accuracy     : N/A (no ground-truth labels found)")
-        print(f"Summary File : {summary_path}")
     finally:
         temp_dir.cleanup()
 

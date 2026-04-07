@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from omegaconf import DictConfig, OmegaConf
 
 DEFAULT_URL = "https://validation-server.onrender.com/api/upload/"
 DEFAULT_TIMEOUT_SECONDS = 120
+VIDEO_UID_FROM_URL_PATTERN = re.compile(r"/([^/?#]+)\.mp4(?:[?#]|$)", re.IGNORECASE)
 
 
 def _load_payload(input_path: Path) -> Any:
@@ -64,16 +66,55 @@ def _coerce_prediction(value: Any, *, q_uid: str) -> int:
     )
 
 
+def _extract_video_uid_from_url(url: str) -> str | None:
+    match = VIDEO_UID_FROM_URL_PATTERN.search(url.strip())
+    if match is None:
+        return None
+    video_uid = match.group(1).strip()
+    return video_uid or None
+
+
+def _extract_submission_uid(item: dict[str, Any], *, fallback_uid: str) -> str:
+    for key in ("video_uid", "video_id", "uid"):
+        value = item.get(key)
+        if value is not None:
+            return str(value)
+
+    uid_metadata = item.get("uid_metadata")
+    if isinstance(uid_metadata, dict):
+        for key in ("video_uid", "video_id", "uid"):
+            value = uid_metadata.get(key)
+            if value is not None:
+                return str(value)
+        for key in ("url", "video_url"):
+            value = uid_metadata.get(key)
+            if isinstance(value, str):
+                video_uid = _extract_video_uid_from_url(value)
+                if video_uid is not None:
+                    return video_uid
+
+    for key in ("url", "video_url"):
+        value = item.get(key)
+        if isinstance(value, str):
+            video_uid = _extract_video_uid_from_url(value)
+            if video_uid is not None:
+                return video_uid
+
+    return fallback_uid
+
+
 def _normalize_submission_payload(raw_payload: Any) -> dict[str, int]:
     if isinstance(raw_payload, dict):
         normalized: dict[str, int] = {}
         for key, value in raw_payload.items():
             q_uid = str(key)
+            submission_uid = q_uid
             if isinstance(value, dict):
                 prediction = value.get("prediction", value.get("answer"))
+                submission_uid = _extract_submission_uid(value, fallback_uid=q_uid)
             else:
                 prediction = value
-            normalized[q_uid] = _coerce_prediction(prediction, q_uid=q_uid)
+            normalized[submission_uid] = _coerce_prediction(prediction, q_uid=submission_uid)
         return normalized
 
     if isinstance(raw_payload, list):
@@ -88,8 +129,9 @@ def _normalize_submission_payload(raw_payload: Any) -> dict[str, int]:
             if q_uid is None:
                 raise ValueError(f"Missing q_uid in list payload at index {index}.")
             q_uid = str(q_uid)
+            submission_uid = _extract_submission_uid(item, fallback_uid=q_uid)
             prediction = item.get("prediction", item.get("answer"))
-            normalized[q_uid] = _coerce_prediction(prediction, q_uid=q_uid)
+            normalized[submission_uid] = _coerce_prediction(prediction, q_uid=submission_uid)
         return normalized
 
     raise ValueError(
