@@ -23,6 +23,62 @@ def _normalize_probabilities(scores: list[float]) -> np.ndarray:
     return probabilities / total
 
 
+def _build_uniform_candidate_indices(
+    total_frames: int,
+    *,
+    num_frames: int,
+    candidate_frames: int | None,
+    candidate_multiplier: int,
+) -> np.ndarray:
+    if total_frames <= 0:
+        return np.empty(0, dtype=int)
+
+    effective_candidate_frames = candidate_frames
+    if effective_candidate_frames is None:
+        effective_candidate_frames = max(num_frames, num_frames * candidate_multiplier)
+
+    effective_candidate_frames = max(num_frames, int(effective_candidate_frames))
+    effective_candidate_frames = min(total_frames, effective_candidate_frames)
+    if effective_candidate_frames == total_frames:
+        return np.arange(total_frames, dtype=int)
+
+    return np.linspace(
+        0,
+        total_frames - 1,
+        effective_candidate_frames,
+    ).round().astype(int)
+
+
+def _decode_frames_at_indices(
+    cap: cv2.VideoCapture,
+    frame_indices: np.ndarray,
+    *,
+    max_side: int | None,
+    ensure_qwen_compatibility: bool,
+    qwen_factor: int,
+) -> tuple[list[np.ndarray], list[int]]:
+    decoded_frames: list[np.ndarray] = []
+    decoded_indices: list[int] = []
+
+    for frame_idx in frame_indices.tolist():
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+        ok, frame_bgr = cap.read()
+        if not ok:
+            continue
+
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        frame_rgb = _resize_frame(
+            frame_rgb,
+            max_side=max_side,
+            ensure_qwen_compatibility=ensure_qwen_compatibility,
+            qwen_factor=qwen_factor,
+        )
+        decoded_frames.append(frame_rgb)
+        decoded_indices.append(int(frame_idx))
+
+    return decoded_frames, decoded_indices
+
+
 def _prepare_gray_frame(frame_rgb: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
     return gray.astype(np.float32) / 255.0
@@ -78,6 +134,8 @@ def adaptive_frame_sampling(
     video_path: str,
     num_frames: int = 8,
     metric: str = "ofvd",
+    candidate_frames: int | None = None,
+    candidate_multiplier: int = 4,
     max_side: int | None = 720,
     ensure_qwen_compatibility: bool = True,
     qwen_factor: int = 28,
@@ -92,25 +150,31 @@ def adaptive_frame_sampling(
 ) -> FrameSelectionResult:
     if num_frames <= 0:
         raise ValueError(f"`num_frames` must be positive, got {num_frames}.")
+    if candidate_multiplier <= 0:
+        raise ValueError(
+            f"`candidate_multiplier` must be positive, got {candidate_multiplier}."
+        )
 
     metric = metric.strip().lower()
     cap, total_frames, fps, transcoded_path = _open_video_for_sampling(video_path)
 
-    frames: list[np.ndarray] = []
-    try:
-        while True:
-            ok, frame_bgr = cap.read()
-            if not ok:
-                break
+    candidate_indices = _build_uniform_candidate_indices(
+        total_frames,
+        num_frames=num_frames,
+        candidate_frames=candidate_frames,
+        candidate_multiplier=candidate_multiplier,
+    )
 
-            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-            frame_rgb = _resize_frame(
-                frame_rgb,
-                max_side=max_side,
-                ensure_qwen_compatibility=ensure_qwen_compatibility,
-                qwen_factor=qwen_factor,
-            )
-            frames.append(frame_rgb)
+    frames: list[np.ndarray] = []
+    decoded_candidate_indices: list[int] = []
+    try:
+        frames, decoded_candidate_indices = _decode_frames_at_indices(
+            cap,
+            candidate_indices,
+            max_side=max_side,
+            ensure_qwen_compatibility=ensure_qwen_compatibility,
+            qwen_factor=qwen_factor,
+        )
     finally:
         cap.release()
         if transcoded_path is not None:
@@ -127,7 +191,7 @@ def adaptive_frame_sampling(
         metadata = {
             "video_path": video_path,
             "decoded_video_path": str(transcoded_path) if transcoded_path is not None else video_path,
-            "sampled_indices": sampled_indices,
+            "sampled_indices": decoded_candidate_indices,
             "num_frames": len(sampled_indices),
             "total_frames": total_frames,
             "fps": fps if fps > 0 else None,
@@ -136,6 +200,8 @@ def adaptive_frame_sampling(
             "qwen_factor": qwen_factor if ensure_qwen_compatibility else None,
             "sampling_method": "afs",
             "afs_metric": metric,
+            "candidate_frames": len(decoded_candidate_indices),
+            "candidate_indices": decoded_candidate_indices,
             "fvi_scores": [1.0 for _ in sampled_indices],
             "fvi_probabilities": [1.0 / len(sampled_indices) for _ in sampled_indices],
         }
@@ -175,6 +241,7 @@ def adaptive_frame_sampling(
             p=fvi_probabilities,
         )
     ).astype(int)
+    sampled_video_indices = [decoded_candidate_indices[int(idx)] for idx in sampled_indices]
 
     sampled_frames = [frames[int(idx)] for idx in sampled_indices]
     base_height, base_width = sampled_frames[0].shape[:2]
@@ -192,7 +259,7 @@ def adaptive_frame_sampling(
     metadata = {
         "video_path": video_path,
         "decoded_video_path": str(transcoded_path) if transcoded_path is not None else video_path,
-        "sampled_indices": sampled_indices.tolist(),
+        "sampled_indices": sampled_video_indices,
         "num_frames": len(normalized_frames),
         "total_frames": total_frames,
         "fps": fps if fps > 0 else None,
@@ -202,6 +269,8 @@ def adaptive_frame_sampling(
         "sampling_method": "afs",
         "afs_metric": metric,
         "random_seed": random_seed,
+        "candidate_frames": len(decoded_candidate_indices),
+        "candidate_indices": decoded_candidate_indices,
         "fvi_scores": [float(score) for score in fvi_scores],
         "fvi_probabilities": fvi_probabilities.tolist(),
     }
