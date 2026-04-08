@@ -62,6 +62,7 @@ def load_prompt(invoke_config: DictConfig) -> dict[str, str]:
     return {
         "system": system_prompt,
         "user": user_prompt,
+        "query": query,
     }
 
 
