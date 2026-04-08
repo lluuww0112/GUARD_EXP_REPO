@@ -10,8 +10,8 @@ import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, CLIPImageProcessor
 
-from ..base.selection import FrameSelectionResult, PatchSelectionResult
-from .cilp_model import CLIPTextModel, CLIPVisionModel_v2
+from ...base.selection import FrameSelectionResult, PatchSelectionResult
+from model.PatchSelection.DenseDPS.cilp_model import CLIPTextModel, CLIPVisionModel_v2
 
 
 SUPPORTED_QWEN_BACKENDS = {"qwen2_vl", "qwen2_5_vl", "qwen3_vl"}

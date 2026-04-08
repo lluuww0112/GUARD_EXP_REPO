@@ -5,8 +5,8 @@ from typing import Any
 
 import torch
 
-from ..base.selection import FrameSelectionResult, PatchSelectionResult
-from .selection_v1 import (
+from ...base.selection import FrameSelectionResult, PatchSelectionResult
+from model.PatchSelection.DenseDPS.selection_v1 import (
     _align_temporal_score_maps,
     _coerce_video_frames,
     _compute_qwen_merge_mean_scores,
@@ -25,7 +25,7 @@ from .selection_v1 import (
     _resize_score_maps,
     SUPPORTED_QWEN_BACKENDS,
 )
-from .selection_v2 import (
+from model.PatchSelection.DenseDPS.selection_v2 import (
     _allocate_budget_with_softmax,
     _compute_dense_patch_score_maps_and_frame_scores,
     _load_maskclip_components_v2,

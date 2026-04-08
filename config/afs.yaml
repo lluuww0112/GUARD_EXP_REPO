@@ -10,7 +10,7 @@ hydra:
     dir: .
 
 frame_selection:
-  _target_: model.FrameSelction.AFS.adaptive_frame_sampling
+  _target_: model.FrameSelection.AFS.adaptive_frame_sampling
   _partial_: true
   num_frames: 10
   metric: "ofvd" # Enum["ofvd", "ssvd"]
