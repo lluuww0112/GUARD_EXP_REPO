@@ -76,10 +76,19 @@ class MDP3VLM(BaseVLM):
         return processor, embedding_model
 
     def _move_to_embedding_device(self, batch: dict[str, Any]) -> dict[str, Any]:
-        device = next(self.embedding_model.parameters()).device
+        model_param = next(self.embedding_model.parameters())
+        device = model_param.device
+        dtype = model_param.dtype
         moved: dict[str, Any] = {}
         for key, value in batch.items():
-            moved[key] = value.to(device) if hasattr(value, "to") else value
+            if not hasattr(value, "to"):
+                moved[key] = value
+                continue
+
+            if torch.is_tensor(value) and value.is_floating_point():
+                moved[key] = value.to(device=device, dtype=dtype)
+            else:
+                moved[key] = value.to(device=device)
         return moved
 
     def _coerce_embedding_tensor(
