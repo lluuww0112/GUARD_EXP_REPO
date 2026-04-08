@@ -14,6 +14,8 @@ frame_selection:
   _partial_: true
   num_frames: 10
   metric: "ofvd" # Enum["ofvd", "ssvd"]
+  candidate_frames: null # null이면 num_frames * candidate_multiplier 개를 균등 후보로 사용
+  candidate_multiplier: 4
   max_side: 720
   ensure_qwen_compatibility: true
   random_seed: 42
