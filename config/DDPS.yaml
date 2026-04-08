@@ -17,7 +17,7 @@ frame_selection:
   ensure_qwen_compatibility: true
 
 patch_selection_v1:
-  _target_: model.PatchSelection.selection_v1.maskclip_patch_selection
+  _target_: model.PatchSelection.DenseDPS.selection_v1.maskclip_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
   clip_model_name: "openai/clip-vit-base-patch16"
@@ -34,7 +34,7 @@ patch_selection_v1:
 
 
 patch_selection_v2: # 프레임 중요도에 따른 budget 분배
-  _target_: model.PatchSelection.selection_v2.maskclip_patch_selection
+  _target_: model.PatchSelection.DenseDPS.selection_v2.maskclip_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
   clip_model_name: "openai/clip-vit-base-patch16"
@@ -52,7 +52,7 @@ patch_selection_v2: # 프레임 중요도에 따른 budget 분배
 
 
 patch_selection_v3: # threshold 기반 eligible patch만 남기고 leftover budget 재분배
-  _target_: model.PatchSelection.selection_v3.maskclip_patch_selection
+  _target_: model.PatchSelection.DenseDPS.selection_v3.maskclip_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
   clip_model_name: "openai/clip-vit-base-patch16"
