@@ -181,7 +181,10 @@ def _log_det_score(l_tilde: torch.Tensor, indices: list[int]) -> float:
     if not indices:
         return 0.0
 
-    submatrix = l_tilde[indices][:, indices]
+    # slogdet does not support low-precision inputs such as bf16/fp16.
+    # MDP3 runs on tiny matrices, so upcasting here is cheap and improves
+    # numerical stability for the DP reward.
+    submatrix = l_tilde[indices][:, indices].to(dtype=torch.float32)
     sign, logabsdet = torch.linalg.slogdet(submatrix)
     return float(logabsdet.item()) if float(sign.item()) > 0 else -1.0e30
 
@@ -218,6 +221,11 @@ def mdp3_frame_selection(
 
     if alphas is None:
         alphas = DEFAULT_ALPHAS
+
+    # Keep encoder inference in low precision if desired, but run the MDP3
+    # kernel/DPP/DP math in fp32 for stability and linalg compatibility.
+    frame_embeds = frame_embeds.to(dtype=torch.float32)
+    query_embed = query_embed.to(dtype=torch.float32)
 
     l_tilde, _, _ = _build_conditional_similarity(
         frame_embeds,
@@ -352,8 +360,14 @@ def mdp3_sampling(
     frame_embeds, query_embed = embed_fn(candidates.frames, query_text)
 
     # CLIP/SigLIP-style embeddings are compared in normalized space.
-    frame_embeds = torch.nn.functional.normalize(frame_embeds, dim=-1)
-    query_embed = torch.nn.functional.normalize(query_embed, dim=-1)
+    frame_embeds = torch.nn.functional.normalize(
+        frame_embeds.to(dtype=torch.float32),
+        dim=-1,
+    )
+    query_embed = torch.nn.functional.normalize(
+        query_embed.to(dtype=torch.float32),
+        dim=-1,
+    )
 
     selected = mdp3_frame_selection(
         frame_embeds,
