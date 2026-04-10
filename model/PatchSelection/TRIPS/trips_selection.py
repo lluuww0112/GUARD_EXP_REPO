@@ -12,6 +12,10 @@ from transformers import AutoTokenizer, CLIPImageProcessor
 
 from ...base.selection import FrameSelectionResult, PatchSelectionResult
 from model.PatchSelection.DenseDPS.cilp_model import CLIPTextModel, CLIPVisionModel_v2
+from model.PatchSelection.DenseDPS.selection_v1 import (
+    _expand_scores_for_frame_duplication,
+    _resolve_patch_scoring_frames,
+)
 
 
 SUPPORTED_QWEN_BACKENDS = {"qwen2_vl", "qwen2_5_vl", "qwen3_vl"}
@@ -636,6 +640,7 @@ def trips_patch_selection(
     )
     frames = _coerce_video_frames(frame_selection)
     frame_count = int(frames.shape[0])
+    scoring_frames, duplication_info = _resolve_patch_scoring_frames(frame_selection)
     grid_t, raw_grid_h, raw_grid_w = _extract_video_grid(
         model_inputs=model_inputs,
         extraction_metadata=extraction_metadata,
@@ -667,7 +672,7 @@ def trips_patch_selection(
         text_model=text_model,
         device=torch.device(selector_device_key),
     )
-    frame_arrays = _prepare_frame_arrays(frames)
+    frame_arrays = _prepare_frame_arrays(scoring_frames)
     clip_score_maps, clip_grid = _compute_clip_score_maps(
         frame_arrays=frame_arrays,
         image_processor=image_processor,
@@ -677,6 +682,10 @@ def trips_patch_selection(
         batch_size=batch_size,
         device=selector_device,
         clip_dtype=resolved_clip_dtype,
+    )
+    clip_score_maps = _expand_scores_for_frame_duplication(
+        clip_score_maps,
+        duplication_info,
     )
 
     raw_score_maps = _resize_score_maps(

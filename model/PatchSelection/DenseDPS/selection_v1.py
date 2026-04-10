@@ -303,6 +303,46 @@ def _prepare_frame_arrays(frames: torch.Tensor) -> list[Any]:
     return list(frames_cpu.numpy())
 
 
+def _resolve_patch_scoring_frames(
+    frame_selection: FrameSelectionResult,
+) -> tuple[torch.Tensor, dict[str, int] | None]:
+    frames = _coerce_video_frames(frame_selection)
+    duplication_metadata = frame_selection.metadata.get("frame_duplication")
+    if not isinstance(duplication_metadata, dict):
+        return frames, None
+    if not bool(duplication_metadata.get("applied", False)):
+        return frames, None
+
+    duplicate_factor = int(duplication_metadata.get("duplicate_factor", 1) or 1)
+    original_num_frames = int(
+        duplication_metadata.get("original_num_frames", 0) or 0
+    )
+    if duplicate_factor <= 1 or original_num_frames <= 0:
+        return frames, None
+    if int(frames.shape[0]) != original_num_frames * duplicate_factor:
+        return frames, None
+
+    return (
+        frames[::duplicate_factor],
+        {
+            "duplicate_factor": duplicate_factor,
+            "original_num_frames": original_num_frames,
+        },
+    )
+
+
+def _expand_scores_for_frame_duplication(
+    scores: torch.Tensor,
+    duplication_info: dict[str, int] | None,
+) -> torch.Tensor:
+    if duplication_info is None:
+        return scores
+    duplicate_factor = int(duplication_info.get("duplicate_factor", 1))
+    if duplicate_factor <= 1:
+        return scores
+    return torch.repeat_interleave(scores, repeats=duplicate_factor, dim=0)
+
+
 def _aggregate_query_scores(
     scores: torch.Tensor,
     *,
@@ -618,6 +658,7 @@ def maskclip_patch_selection(
     resolved_selection_mode = _resolve_selection_mode(selection_mode)
     frames = _coerce_video_frames(frame_selection)
     frame_count = int(frames.shape[0])
+    scoring_frames, duplication_info = _resolve_patch_scoring_frames(frame_selection)
     grid_t, raw_grid_h, raw_grid_w = _extract_video_grid(
         model_inputs=model_inputs,
         extraction_metadata=extraction_metadata,
@@ -653,7 +694,7 @@ def maskclip_patch_selection(
         clip_dtype_key,
         queries,
     )
-    frame_arrays = _prepare_frame_arrays(frames)
+    frame_arrays = _prepare_frame_arrays(scoring_frames)
     dense_score_maps, clip_grid = _compute_dense_patch_score_maps(
         frame_arrays,
         image_processor=image_processor,
@@ -663,6 +704,10 @@ def maskclip_patch_selection(
         batch_size=batch_size,
         device=selector_device,
         clip_dtype=resolved_clip_dtype,
+    )
+    dense_score_maps = _expand_scores_for_frame_duplication(
+        dense_score_maps,
+        duplication_info,
     )
     raw_score_maps = _resize_score_maps(
         dense_score_maps,

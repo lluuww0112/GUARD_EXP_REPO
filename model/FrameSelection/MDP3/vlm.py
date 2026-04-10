@@ -190,6 +190,7 @@ class MDP3VLM(BaseVLM):
         )
         if not isinstance(frame_selection, FrameSelectionResult):
             raise TypeError("MDP3 frame selector must return a FrameSelectionResult.")
+        frame_selection = self._duplicate_frame_selection(frame_selection)
 
         video_tensor = frame_selection.frames
         prompt_text = self._prepare_text_input(

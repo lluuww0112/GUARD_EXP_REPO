@@ -7,7 +7,7 @@ import time
 from types import MethodType
 import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -125,6 +125,8 @@ class BaseVLM(VLMInterface):
         frame_selector: FrameSelector,
         patch_selector: PatchSelector | None = None,
         backend: str = "qwen3_vl",
+        duplicate_factor: int = 1,
+        duplicate_for_qwen_only: bool = True,
         processor_kwargs: dict[str, Any] | None = None,
         model_kwargs: dict[str, Any] | None = None,
         generation_kwargs: dict[str, Any] | None = None,
@@ -139,10 +141,17 @@ class BaseVLM(VLMInterface):
 
         backend_config = VLM_BACKENDS[backend]
 
+        if duplicate_factor <= 0:
+            raise ValueError(
+                f"`duplicate_factor` must be positive, got {duplicate_factor}."
+            )
+
         self.frame_selector = frame_selector
         self.patch_selector = patch_selector
         self.frame_selector_kwargs = frame_selector_kwargs
         self.backend = backend
+        self.duplicate_factor = int(duplicate_factor)
+        self.duplicate_for_qwen_only = bool(duplicate_for_qwen_only)
         self.processor_cls = backend_config["processor_cls"]
         self.model_cls = backend_config["model_cls"]
         self.processor_kwargs = dict(processor_kwargs or {})
@@ -160,6 +169,10 @@ class BaseVLM(VLMInterface):
             "applied": False,
             "backend": backend,
             "reason": "not_run",
+        }
+        self.last_frame_duplication_info: dict[str, Any] = {
+            "applied": False,
+            "duplicate_factor": self.duplicate_factor,
         }
         self.last_timing_info: dict[str, Any] = {}
 
@@ -516,6 +529,118 @@ class BaseVLM(VLMInterface):
             )
         raise TypeError(
             "Frame selector output must be a torch.Tensor, FrameSelectionResult, or None."
+        )
+
+    def _should_duplicate_frames(self) -> bool:
+        if self.duplicate_factor <= 1:
+            return False
+        if self.duplicate_for_qwen_only and self.backend != "qwen3_vl":
+            return False
+        return True
+
+    def _coerce_index_list(
+        self,
+        value: Any,
+        *,
+        expected_length: int,
+    ) -> list[int] | None:
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            return None
+        if len(value) != expected_length:
+            return None
+
+        indices: list[int] = []
+        for item in value:
+            if isinstance(item, bool) or not isinstance(item, int):
+                return None
+            indices.append(int(item))
+        return indices
+
+    def _repeat_index_list(self, indices: list[int]) -> list[int]:
+        duplicated: list[int] = []
+        for index in indices:
+            duplicated.extend([index] * self.duplicate_factor)
+        return duplicated
+
+    def _resolve_selected_frame_indices(
+        self,
+        metadata: dict[str, Any],
+        *,
+        frame_count: int,
+    ) -> tuple[list[int], str]:
+        for key in ("selected_original_indices", "sampled_indices"):
+            indices = self._coerce_index_list(
+                metadata.get(key),
+                expected_length=frame_count,
+            )
+            if indices is not None:
+                return indices, key
+        return list(range(frame_count)), "range"
+
+    def _duplicate_frame_selection(
+        self,
+        frame_selection: FrameSelectionResult,
+    ) -> FrameSelectionResult:
+        frames = frame_selection.frames
+        if frames is None or not self._should_duplicate_frames():
+            self.last_frame_duplication_info = {
+                "applied": False,
+                "duplicate_factor": self.duplicate_factor,
+                "reason": "disabled_or_no_frames",
+            }
+            return frame_selection
+        if not torch.is_tensor(frames):
+            raise TypeError("Frame selection frames must be a torch.Tensor.")
+        if frames.ndim != 4:
+            raise ValueError(
+                "Expected sampled video frames with shape (T, H, W, C), "
+                f"but got {tuple(frames.shape)}."
+            )
+
+        original_frame_count = int(frames.shape[0])
+        duplicated_frames = torch.repeat_interleave(
+            frames,
+            repeats=self.duplicate_factor,
+            dim=0,
+        )
+
+        metadata = dict(frame_selection.metadata)
+        resolved_indices, resolved_index_source = self._resolve_selected_frame_indices(
+            metadata,
+            frame_count=original_frame_count,
+        )
+        metadata["frame_duplication"] = {
+            "applied": True,
+            "duplicate_factor": self.duplicate_factor,
+            "original_num_frames": original_frame_count,
+            "duplicated_num_frames": int(duplicated_frames.shape[0]),
+            "sampled_index_source": resolved_index_source,
+        }
+        metadata["num_frames_before_duplication"] = original_frame_count
+        metadata["num_frames"] = int(duplicated_frames.shape[0])
+        metadata["sampled_indices_before_duplication"] = list(resolved_indices)
+        metadata["sampled_indices"] = self._repeat_index_list(resolved_indices)
+
+        for key in ("selected_original_indices", "selected_from_candidates"):
+            original_indices = self._coerce_index_list(
+                metadata.get(key),
+                expected_length=original_frame_count,
+            )
+            if original_indices is None:
+                continue
+            metadata[f"{key}_before_duplication"] = list(original_indices)
+            metadata[key] = self._repeat_index_list(original_indices)
+
+        self.last_frame_duplication_info = {
+            "applied": True,
+            "duplicate_factor": self.duplicate_factor,
+            "original_num_frames": original_frame_count,
+            "duplicated_num_frames": int(duplicated_frames.shape[0]),
+            "sampled_index_source": resolved_index_source,
+        }
+        return FrameSelectionResult(
+            frames=duplicated_frames,
+            metadata=metadata,
         )
 
     def _normalize_prompt_input(
@@ -1190,6 +1315,7 @@ class BaseVLM(VLMInterface):
             self.frame_selector(video_path=video_path, **selector_kwargs),
             video_path=video_path,
         )
+        frame_selection = self._duplicate_frame_selection(frame_selection)
         video_tensor = frame_selection.frames
         prompt_text = self._prepare_text_input(
             prompt,

@@ -6,8 +6,8 @@ frame_selection:
   _target_: model.FrameSelection.MDP3.selection.mdp3_sampling
   _partial_: true
   query_file: ${invoke.query_file}
-  num_candidates: 16 # 메모리가 터져서 32로.. 
-  num_frames: 8
+  num_candidates: 128
+  num_frames: 10
   segment_size: 32
   lam: 0.2
   alphas: [0.125, 0.25, 1.0, 2.0, 4.0]
@@ -35,8 +35,11 @@ vlm:
       llm_int8_enable_fp32_cpu_offload: false
   frame_selector: ${frame_selection}
   patch_selector: ${patch_selection}
+  duplicate_factor: 2 # 1이면 프레임 복사 비활성
+  duplicate_for_qwen_only: true
   processor_kwargs: {}
-  model_kwargs: {}
+  model_kwargs:
+    attn_implementation: "flash_attention_2"
   local_model_dir: "./model/repo"
   generation_kwargs:
     do_sample: true
