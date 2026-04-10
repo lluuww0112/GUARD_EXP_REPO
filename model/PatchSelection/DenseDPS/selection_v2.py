@@ -18,9 +18,11 @@ from .selection_v1 import (
     _compute_qwen_merge_mean_scores,
     _compute_sliding_window_merged_scores,
     _compute_window_score_maps,
+    _expand_scores_for_frame_duplication,
     _extract_video_grid,
     _load_queries,
     _prepare_frame_arrays,
+    _resolve_patch_scoring_frames,
     _resolve_clip_dtype,
     _resolve_device,
     _resolve_device_key,
@@ -385,6 +387,7 @@ def maskclip_patch_selection(
     resolved_selection_mode = _resolve_selection_mode(selection_mode)
     frames = _coerce_video_frames(frame_selection)
     frame_count = int(frames.shape[0])
+    scoring_frames, duplication_info = _resolve_patch_scoring_frames(frame_selection)
     grid_t, raw_grid_h, raw_grid_w = _extract_video_grid(
         model_inputs=model_inputs,
         extraction_metadata=extraction_metadata,
@@ -420,7 +423,7 @@ def maskclip_patch_selection(
         clip_dtype_key,
         queries,
     )
-    frame_arrays = _prepare_frame_arrays(frames)
+    frame_arrays = _prepare_frame_arrays(scoring_frames)
     dense_score_maps, image_frame_scores, clip_grid = (
         _compute_dense_patch_score_maps_and_frame_scores(
             frame_arrays,
@@ -432,6 +435,14 @@ def maskclip_patch_selection(
             device=selector_device,
             clip_dtype=resolved_clip_dtype,
         )
+    )
+    dense_score_maps = _expand_scores_for_frame_duplication(
+        dense_score_maps,
+        duplication_info,
+    )
+    image_frame_scores = _expand_scores_for_frame_duplication(
+        image_frame_scores,
+        duplication_info,
     )
     raw_score_maps = _resize_score_maps(
         dense_score_maps,

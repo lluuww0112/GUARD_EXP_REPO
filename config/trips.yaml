@@ -17,7 +17,7 @@ frame_selection:
   max_side: 720
   ensure_qwen_compatibility: true
 
-patch_selection:
+patch_selection_v1:
   _target_: model.PatchSelection.TRIPS.trips_selection.trips_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
@@ -40,6 +40,24 @@ patch_selection:
   fuse_scope: "global"
   device: null
 
+patch_selection_v2:
+  _target_: model.PatchSelection.TRIPS.trips_budget_selection.budget_fuse_patch_selection
+  _partial_: true
+  query_file: ${invoke.query_file}
+  clip_model_name: "openai/clip-vit-base-patch16"
+  clip_dtype: "bf16"
+  total_budget: null
+  keep_ratio: 0.05
+  temperature: 0.4
+  selection_mode: "naive_mean"
+  window_size: 4
+  window_stride: 2
+  aggregation: "max"
+  batch_size: ${frame_selection.num_frames}
+  spatial_merge_size: null
+  fuse_strategy: "mean"
+  device: null
+
 vlm:
   _target_: model.base.BaseVLM
   model_id: "Qwen/Qwen3-VL-8B-Instruct"
@@ -57,7 +75,9 @@ vlm:
       llm_int8_threshold: 6.0
       llm_int8_enable_fp32_cpu_offload: false
   frame_selector: ${frame_selection}
-  patch_selector: ${patch_selection}
+  patch_selector: ${patch_selection_v2}
+  duplicate_factor: 2 # 1이면 프레임 복사 비활성
+  duplicate_for_qwen_only: true
   processor_kwargs: {}
   model_kwargs: {}
   local_model_dir: "./model/repo"

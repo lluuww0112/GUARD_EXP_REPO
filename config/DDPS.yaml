@@ -23,8 +23,7 @@ patch_selection_v1:
   clip_model_name: "openai/clip-vit-base-patch16"
   clip_dtype: "bf16"
   keep_ratio: 0.075
-  # Enum["naive_mean" | "sliding_window"], naive_mean -> 단순 평균 산출, sliding_window -> 경계 정보 보전하며 윈도우 슬라이딩으로 패치 스코어 산출
-  selection_mode: "naive_mean" 
+  selection_mode: "naive_mean" # Enum["naive_mean" | "sliding_window"], naive_mean -> 단순 평균 산출, sliding_window -> 경계 정보 보전하며 윈도우 슬라이딩으로 패치 스코어 산출
   window_size: 4
   window_stride: 2 
   aggregation: "max" # 다중 쿼리 집계 방식, Enum["max" | "mean"]
@@ -70,14 +69,13 @@ patch_selection_v3: # threshold 기반 eligible patch만 남기고 leftover budg
   device: null
 
 
-
 vlm:
   _target_: model.base.BaseVLM
   model_id: "Qwen/Qwen3-VL-8B-Instruct"
   backend: "qwen3_vl"
   dtype: "bf16"
   quantization:
-    enabled: true
+    enabled: false
     mode: "4bit"
     skip_vision_encoder: true
     skip_modules: []
@@ -89,6 +87,8 @@ vlm:
       llm_int8_enable_fp32_cpu_offload: false
   frame_selector: ${frame_selection}
   patch_selector: ${patch_selection_v3}
+  duplicate_factor: 2 # 1이면 프레임 복사 비활성
+  duplicate_for_qwen_only: true
   processor_kwargs: {}
   model_kwargs: {}
   local_model_dir: "./model/repo"

@@ -17,4 +17,4 @@ egoschema:
   resume: false # 이전에 연산해둔거 있으면 이어서 실행
   progress_interval: 10 # tqdm 업데이트 간격
   start_index: 0 # 시작 샘플 인덱스, 즉 limit이 300이면 0~299의 샘플을 사용
-  limit: 300 # 테스트할 샘플 수, null로 설정되면 전체 평가
+  limit: null # 테스트할 샘플 수, null로 설정되면 전체 평가
