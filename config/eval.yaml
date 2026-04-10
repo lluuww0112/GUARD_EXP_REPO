@@ -18,3 +18,14 @@ egoschema:
   progress_interval: 10 # tqdm 업데이트 간격
   start_index: 0 # 시작 샘플 인덱스, 즉 limit이 300이면 0~299의 샘플을 사용
   limit: null # 테스트할 샘플 수, null로 설정되면 전체 평가
+
+nextqa:
+  dataset_root: "/content/drive/MyDrive/NExTVideo/nextqa" # Colab + Google Drive default root
+  questions_file: "/content/drive/MyDrive/NExTVideo/nextqa/val.csv"
+  videos_dir: "/content/drive/MyDrive/NExTVideo/nextqa/videos"
+  output_dir: "./eval/result"
+  output_file: "./eval/result/nextqa_pred.jsonl"
+  resume: false # resume from existing output file
+  progress_interval: 10 # tqdm update interval
+  start_index: 0 # first sample index
+  limit: 300 # sample limit, set null for full evaluation
