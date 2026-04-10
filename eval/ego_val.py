@@ -19,6 +19,7 @@ from omegaconf import DictConfig, OmegaConf
 DEFAULT_URL = "https://validation-server.onrender.com/api/upload/"
 DEFAULT_TIMEOUT_SECONDS = 120
 VIDEO_UID_FROM_URL_PATTERN = re.compile(r"/([^/?#]+)\.mp4(?:[?#]|$)", re.IGNORECASE)
+SKIP_PARSE_METHODS = {"unparsed", "empty_response"}
 
 
 def _load_payload(input_path: Path) -> Any:
@@ -103,51 +104,79 @@ def _extract_submission_uid(item: dict[str, Any], *, fallback_uid: str) -> str:
     return fallback_uid
 
 
-def _normalize_submission_payload(raw_payload: Any) -> dict[str, int]:
+def _should_skip_item(item: dict[str, Any]) -> str | None:
+    parse_method = item.get("parse_method")
+    if isinstance(parse_method, str) and parse_method in SKIP_PARSE_METHODS:
+        return f"parse_method={parse_method}"
+
+    if item.get("prediction", item.get("answer")) is None:
+        return "missing_prediction"
+
+    return None
+
+
+def _normalize_submission_payload(raw_payload: Any) -> tuple[dict[str, int], list[str]]:
     if isinstance(raw_payload, dict):
         normalized: dict[str, int] = {}
+        skipped: list[str] = []
         for key, value in raw_payload.items():
             q_uid = str(key)
             submission_uid = q_uid
             if isinstance(value, dict):
+                skip_reason = _should_skip_item(value)
+                if skip_reason is not None:
+                    skipped.append(f"{q_uid} ({skip_reason})")
+                    continue
                 prediction = value.get("prediction", value.get("answer"))
                 submission_uid = _extract_submission_uid(value, fallback_uid=q_uid)
             else:
                 prediction = value
-            normalized[submission_uid] = _coerce_prediction(prediction, q_uid=submission_uid)
-        return normalized
+            try:
+                normalized[submission_uid] = _coerce_prediction(prediction, q_uid=submission_uid)
+            except ValueError as exc:
+                skipped.append(f"{submission_uid} ({exc})")
+        return normalized, skipped
 
     if isinstance(raw_payload, list):
         normalized: dict[str, int] = {}
+        skipped: list[str] = []
         for index, item in enumerate(raw_payload, start=1):
             if not isinstance(item, dict):
-                raise ValueError(
-                    f"List payload entries must be objects, got {type(item).__name__} "
-                    f"at index {index}."
+                skipped.append(
+                    f"index={index} (expected object, got {type(item).__name__})"
                 )
+                continue
             q_uid = item.get("q_uid") or item.get("quid") or item.get("uid")
             if q_uid is None:
-                raise ValueError(f"Missing q_uid in list payload at index {index}.")
+                skipped.append(f"index={index} (missing q_uid)")
+                continue
             q_uid = str(q_uid)
+            skip_reason = _should_skip_item(item)
+            if skip_reason is not None:
+                skipped.append(f"{q_uid} ({skip_reason})")
+                continue
             submission_uid = _extract_submission_uid(item, fallback_uid=q_uid)
             prediction = item.get("prediction", item.get("answer"))
-            normalized[submission_uid] = _coerce_prediction(prediction, q_uid=submission_uid)
-        return normalized
+            try:
+                normalized[submission_uid] = _coerce_prediction(prediction, q_uid=submission_uid)
+            except ValueError as exc:
+                skipped.append(f"{submission_uid} ({exc})")
+        return normalized, skipped
 
     raise ValueError(
         "Unsupported prediction file format. Expected JSON object, JSON list, or JSONL."
     )
 
 
-def load_submission_payload(input_path: str | Path) -> dict[str, int]:
+def load_submission_payload(input_path: str | Path) -> tuple[dict[str, int], list[str]]:
     path = Path(input_path).expanduser().resolve()
     if not path.exists():
         raise FileNotFoundError(f"Prediction file not found: {path}")
     raw_payload = _load_payload(path)
-    normalized_payload = _normalize_submission_payload(raw_payload)
+    normalized_payload, skipped_entries = _normalize_submission_payload(raw_payload)
     if not normalized_payload:
         raise ValueError(f"No predictions found in: {path}")
-    return normalized_payload
+    return normalized_payload, skipped_entries
 
 
 def send_post_request(
@@ -185,8 +214,17 @@ def main(config: DictConfig) -> None:
     timeout = int(val_config.get("timeout", DEFAULT_TIMEOUT_SECONDS))
     dry_run = bool(val_config.get("dry_run", False))
 
-    payload = load_submission_payload(input_file)
+    payload, skipped_entries = load_submission_payload(input_file)
     print(f"Loaded predictions : {len(payload)}")
+    print(f"Skipped entries    : {len(skipped_entries)}")
+    if skipped_entries:
+        preview_count = min(len(skipped_entries), 5)
+        print("Skipped preview    :")
+        for entry in skipped_entries[:preview_count]:
+            print(f"  - {entry}")
+        remaining = len(skipped_entries) - preview_count
+        if remaining > 0:
+            print(f"  - ... and {remaining} more")
 
     if config.get("print_config", False):
         print("=== Resolved Config ===")
