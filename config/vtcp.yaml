@@ -23,13 +23,13 @@ frame_selection:
   initial_stride: 2 # 초반부터 큰 점프를 하지 않도록 시작 stride를 줄여 국소 피크를 덜 건너뛰게 함.
   stride_controller:
     _target_: model.FrameSelection.VTCP.RenoStrideController
-    slow_start_threshold: 8 # 이 값 미만에서는 slow start처럼 stride를 더 빠르게 키움.
+    slow_start_threshold: 16 # 이 값 미만에서는 slow start처럼 stride를 더 빠르게 키움.
     slow_start_multiplier: 1.5 # slow start 구간에서 적용할 stride 증가 배수.
     additive_step: 1 # slow start 이후 선형 증가폭.
     decrease_factor: 0.3 # score threshold를 넘으면 stride를 얼마나 줄일지.
-    score_threshold: 0.14 # min-max가 아닌 smoothed raw transition score 기준 threshold.
+    score_threshold: 0.15 
     min_stride: 1
-    max_stride: 16
+    max_stride: 32
   clip_model_name: "openai/clip-vit-base-patch16" 
   clip_dtype: "bf16" 
   clip_batch_size: 512 
@@ -70,7 +70,7 @@ vlm:
     max_new_tokens: 128
 
 invoke:
-  video_path: "./data/NXLMRmKt2EU.mp4"
+  video_path: "./data/2DdOXATeZBU.mp4"
   prompt_file: "model/base/prompt.txt"
   query_file: "model/base/query.txt"
   print_config: false
