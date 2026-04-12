@@ -21,3 +21,6 @@ nextqa_val:
   input_file: "./eval/result/nextqa_pred.jsonl"
   dataset_root: "/content/drive/MyDrive/NExTVideo/nextqa"
   questions_file: "/content/drive/MyDrive/NExTVideo/nextqa/val.csv"
+
+videomme_val:
+  results_file: "./eval/result/videomme_results.json"
