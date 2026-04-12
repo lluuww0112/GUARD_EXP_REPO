@@ -183,13 +183,17 @@ def uniform_sampling(
 
     cap, total_frames, fps, transcoded_path = _open_video_for_sampling(video_path)
 
-    if num_frames == 1:
+    use_all_frames = total_frames <= num_frames
+    if use_all_frames:
+        indices = list(range(total_frames))
+    elif num_frames == 1:
         indices = [total_frames // 2]
     else:
         indices = np.linspace(0, total_frames - 1, num_frames).round().astype(int).tolist()
 
     target_set = set(indices)
     frames: list[np.ndarray] = []
+    prefix_frames: list[np.ndarray] = []
     sampled_indices: list[int] = []
     frame_idx = 0
 
@@ -199,7 +203,9 @@ def uniform_sampling(
             if not ok:
                 break
 
-            if frame_idx in target_set:
+            should_keep_prefix = frame_idx < num_frames
+            should_sample = frame_idx in target_set
+            if should_keep_prefix or should_sample:
                 frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
                 frame_rgb = _resize_frame(
                     frame_rgb,
@@ -207,8 +213,13 @@ def uniform_sampling(
                     ensure_qwen_compatibility=ensure_qwen_compatibility,
                     qwen_factor=qwen_factor,
                 )
-                frames.append(frame_rgb)
-                sampled_indices.append(frame_idx)
+                if should_keep_prefix:
+                    # Keep the prefix so we can fall back to "all decoded frames"
+                    # when the actual video is shorter than the requested sample count.
+                    prefix_frames.append(frame_rgb)
+                if should_sample:
+                    frames.append(frame_rgb)
+                    sampled_indices.append(frame_idx)
 
             frame_idx += 1
     finally:
@@ -216,10 +227,20 @@ def uniform_sampling(
         if transcoded_path is not None:
             shutil.rmtree(transcoded_path.parent, ignore_errors=True)
 
+    actual_total_frames = frame_idx
+    used_short_video_fallback = False
+    used_index_mismatch_fallback = False
     if len(frames) != len(indices):
-        raise RuntimeError(
-            f"Expected {len(indices)} sampled frames, but got {len(frames)}."
-        )
+        recoverable_frame_count = min(actual_total_frames, num_frames)
+        if recoverable_frame_count <= 0 or len(prefix_frames) != recoverable_frame_count:
+            raise RuntimeError(
+                f"Expected {len(indices)} sampled frames, but got {len(frames)}."
+            )
+        frames = prefix_frames
+        sampled_indices = list(range(recoverable_frame_count))
+        indices = sampled_indices.copy()
+        used_short_video_fallback = actual_total_frames < num_frames
+        used_index_mismatch_fallback = not used_short_video_fallback
 
     base_height, base_width = frames[0].shape[:2]
     normalized_frames = []
@@ -239,10 +260,13 @@ def uniform_sampling(
         "sampled_indices": sampled_indices,
         "num_frames": len(normalized_frames),
         "total_frames": total_frames,
+        "decoded_total_frames": actual_total_frames,
         "fps": fps if fps > 0 else None,
         "frame_shape": list(video_np.shape[1:]),
         "ensure_qwen_compatibility": ensure_qwen_compatibility,
         "qwen_factor": qwen_factor if ensure_qwen_compatibility else None,
+        "used_short_video_fallback": used_short_video_fallback,
+        "used_index_mismatch_fallback": used_index_mismatch_fallback,
     }
     return FrameSelectionResult(
         frames=torch.from_numpy(video_np),

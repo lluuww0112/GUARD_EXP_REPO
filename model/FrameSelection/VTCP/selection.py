@@ -20,7 +20,7 @@ from model.base.selection import (
     _resize_frame,
 )
 
-from .controller import RenoStrideController
+from .controller import EMAStrideController
 
 
 CLIP_DTYPE_MAP = {
@@ -398,6 +398,81 @@ def _moving_average(
     return smoothed
 
 
+def _normalize_score_signal(
+    scores: np.ndarray,
+    *,
+    eps: float = 1.0e-6,
+) -> np.ndarray:
+    values = np.asarray(scores, dtype=np.float32)
+    if values.size == 0:
+        return values.astype(np.float32, copy=True)
+
+    min_value = float(np.min(values))
+    max_value = float(np.max(values))
+    if not np.isfinite(min_value) or not np.isfinite(max_value):
+        raise ValueError("Control signals must contain only finite values.")
+
+    scale = max_value - min_value
+    if scale <= eps:
+        return np.zeros_like(values, dtype=np.float32)
+
+    return ((values - min_value) / scale).astype(np.float32)
+
+
+def _build_query_aware_control_scores(
+    transition_scores: np.ndarray,
+    query_scores: np.ndarray,
+    *,
+    query_score_weight: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if not 0.0 <= query_score_weight <= 1.0:
+        raise ValueError(
+            "`query_score_weight` must be within [0, 1], "
+            f"got {query_score_weight}."
+        )
+
+    transition_signal = _normalize_score_signal(transition_scores)
+    query_signal = _normalize_score_signal(query_scores)
+    control_scores = (
+        (1.0 - float(query_score_weight)) * transition_signal
+        + float(query_score_weight) * query_signal
+    ).astype(np.float32)
+    return control_scores, transition_signal, query_signal
+
+
+def _reset_stride_controller(
+    stride_controller: Callable[[int, float], int],
+) -> None:
+    reset_hook = getattr(stride_controller, "reset", None)
+    if callable(reset_hook):
+        reset_hook()
+
+
+def _extract_controller_config(
+    stride_controller: Callable[[int, float], int],
+) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    for key, value in vars(stride_controller).items():
+        if key.startswith("_"):
+            continue
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            config[key] = value
+    return config
+
+
+def _extract_controller_diagnostics(
+    stride_controller: Callable[[int, float], int],
+) -> dict[str, Any]:
+    diagnostics_hook = getattr(stride_controller, "get_diagnostics", None)
+    if not callable(diagnostics_hook):
+        return {}
+
+    diagnostics = diagnostics_hook()
+    if not isinstance(diagnostics, dict):
+        return {}
+    return diagnostics
+
+
 def _traverse_with_dynamic_stride(
     control_scores: np.ndarray,
     *,
@@ -409,6 +484,7 @@ def _traverse_with_dynamic_stride(
     if control_scores.size == 0:
         return [], [], []
 
+    _reset_stride_controller(stride_controller)
     visited_indices = [0]
     stride_history: list[int] = []
     control_score_history: list[float] = []
@@ -537,6 +613,7 @@ def vtcp_sampling(
     similarity_metric: str = "cos_sim",
     sma_window: int = 5,
     sma_warmup_frames: int = 0,
+    query_score_weight: float = 0.5,
     initial_stride: int = 4,
     stride_controller: Callable[[int, float], int] | None = None,
     clip_model_name: str = "openai/clip-vit-base-patch16",
@@ -601,8 +678,18 @@ def vtcp_sampling(
             window_size=sma_window,
             warmup_frames=sma_warmup_frames,
         )
-        control_scores = smoothed_scores
-        resolved_controller = stride_controller or RenoStrideController()
+        frame_query_scores = torch.matmul(
+            frame_embeddings,
+            query_embedding,
+        ).to(dtype=torch.float32).cpu()
+        control_scores, normalized_transition_scores, normalized_query_scores = (
+            _build_query_aware_control_scores(
+                smoothed_scores,
+                frame_query_scores.numpy(),
+                query_score_weight=query_score_weight,
+            )
+        )
+        resolved_controller = stride_controller or EMAStrideController()
         visited_positions, stride_history, visited_control_scores = _traverse_with_dynamic_stride(
             control_scores,
             initial_stride=initial_stride,
@@ -616,8 +703,7 @@ def vtcp_sampling(
             min_selected_frames=min_selected_frames,
             max_selected_frames=max_selected_frames,
         )
-        visited_embeddings = frame_embeddings[visited_positions]
-        visited_query_scores = torch.matmul(visited_embeddings, query_embedding)
+        visited_query_scores = frame_query_scores[visited_positions]
         ranked_positions = torch.topk(
             visited_query_scores,
             k=selected_count,
@@ -653,11 +739,6 @@ def vtcp_sampling(
             "decoded_video_path": decoded_video_path,
             "sampling_method": "vtcp",
             "stride_controller": type(resolved_controller).__name__,
-            "score_threshold": (
-                float(getattr(resolved_controller, "score_threshold"))
-                if hasattr(resolved_controller, "score_threshold")
-                else None
-            ),
             "sampled_indices": decoded_selected_indices,
             "selected_original_indices": decoded_selected_indices,
             "visited_indices": visited_indices,
@@ -668,9 +749,10 @@ def vtcp_sampling(
             "ensure_qwen_compatibility": ensure_qwen_compatibility,
             "qwen_factor": qwen_factor if ensure_qwen_compatibility else None,
             "similarity_metric": similarity_metric,
-            "top_ratio": float(top_ratio),
             "sma_window": int(sma_window),
             "sma_warmup_frames": int(sma_warmup_frames),
+            "query_score_weight": float(query_score_weight),
+            "top_ratio": float(top_ratio),
             "min_selected_frames": int(min_selected_frames),
             "max_selected_frames": (
                 int(max_selected_frames)
@@ -679,6 +761,7 @@ def vtcp_sampling(
             ),
             "initial_stride": int(initial_stride),
             "stride_history": stride_history,
+            "stride_controller_config": _extract_controller_config(resolved_controller),
             "query_source": query_source,
             "query_text": query,
             "clip_model_name": clip_model_name,
@@ -698,9 +781,16 @@ def vtcp_sampling(
             metadata["embedded_frame_indices"] = list(frame_indices)
             metadata["raw_transition_scores"] = transition_scores.tolist()
             metadata["smoothed_transition_scores"] = smoothed_scores.tolist()
+            metadata["frame_query_scores"] = frame_query_scores.tolist()
+            metadata["normalized_transition_scores"] = normalized_transition_scores.tolist()
+            metadata["normalized_query_scores"] = normalized_query_scores.tolist()
             metadata["control_signal_scores"] = control_scores.tolist()
             metadata["visited_query_scores"] = visited_query_scores.tolist()
             metadata["visited_control_scores"] = visited_control_scores
+            for key, value in _extract_controller_diagnostics(
+                resolved_controller
+            ).items():
+                metadata[f"stride_controller_{key}"] = value
 
         return FrameSelectionResult(
             frames=frames,

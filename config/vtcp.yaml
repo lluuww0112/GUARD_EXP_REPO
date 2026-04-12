@@ -14,30 +14,28 @@ frame_selection:
   _target_: model.FrameSelection.VTCP.vtcp_sampling
   _partial_: true
   query_file: ${invoke.query_file} 
-  top_ratio: 0.2 
+  top_ratio: 0.4
   min_selected_frames: 4 
   max_selected_frames: 10 # 최종 선택 프레임 수의 최대값, null이면 상한 없음.
   similarity_metric: "cos_sim" # Enum[cos_sim / l1 / l2]
-  sma_window: 5 
+  sma_window: 5
   sma_warmup_frames: 5
-  initial_stride: 2 # 초반부터 큰 점프를 하지 않도록 시작 stride를 줄여 국소 피크를 덜 건너뛰게 함.
+  query_score_weight: 0.4 # control score에서 query relevance가 차지하는 비중.
+  initial_stride: 1 # SMA 이후 EMA stride controller가 사용할 시작 stride.
   stride_controller:
-    _target_: model.FrameSelection.VTCP.RenoStrideController
-    slow_start_threshold: 16 # 이 값 미만에서는 slow start처럼 stride를 더 빠르게 키움.
-    slow_start_multiplier: 1.5 # slow start 구간에서 적용할 stride 증가 배수.
-    additive_step: 1 # slow start 이후 선형 증가폭.
-    decrease_factor: 0.3 # score threshold를 넘으면 stride를 얼마나 줄일지.
-    score_threshold: 0.15 
+    _target_: model.FrameSelection.VTCP.EMAStrideController
+    alpha: 0.2 # 최근 변화량을 EMA baseline에 얼마나 빠르게 반영할지.
+    gamma: 3 # baseline 대비 novelty에 얼마나 민감하게 stride를 조정할지.
     min_stride: 1
-    max_stride: 32
+    max_stride: 12
   clip_model_name: "openai/clip-vit-base-patch16" 
   clip_dtype: "bf16" 
   clip_batch_size: 512 
-  embedding_frame_stride: 25 # 후보 프레임 선택 stride
-  embedding_max_frames: 514 # 최대 후보 프레임 갯수
+  embedding_frame_stride: 7 # 후보 프레임 선택 stride
+  embedding_max_frames: 2000 # 최대 후보 프레임 갯수
   max_side: 720 
   ensure_qwen_compatibility: true
-  qwen_factor: 28 
+  qwen_factor: 10
   store_diagnostics: false # 원시 변화량/제어 점수/쿼리 점수 배열을 metadata에 저장할지 여부.
 
 patch_selection: null
@@ -70,7 +68,7 @@ vlm:
     max_new_tokens: 128
 
 invoke:
-  video_path: "./data/2DdOXATeZBU.mp4"
+  video_path: "./data/ydcPPppK7Dg.mp4"
   prompt_file: "model/base/prompt.txt"
   query_file: "model/base/query.txt"
   print_config: false

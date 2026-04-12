@@ -26,48 +26,52 @@ def _clamp_stride(
     return max(min_stride, min(int(stride), max_stride))
 
 
-class RenoStrideController:
+class EMAStrideController:
+    """Adapt stride continuously using score novelty against an EMA baseline."""
+
     def __init__(
         self,
-        additive_step: int = 1,
-        decrease_factor: float = 0.5,
-        score_threshold: float = 0.5,
-        slow_start_threshold: int = 8,
-        slow_start_multiplier: float = 2.0,
+        alpha: float = 0.3,
+        gamma: float = 1.0,
         min_stride: int = 1,
         max_stride: int = 32,
+        eps: float = 1.0e-6,
     ) -> None:
-        if additive_step <= 0:
+        if not 0.0 < alpha <= 1.0:
             raise ValueError(
-                f"`additive_step` must be positive, got {additive_step}."
+                f"`alpha` must be in the interval (0, 1], got {alpha}."
             )
-        if not 0.0 < decrease_factor < 1.0:
-            raise ValueError(
-                "`decrease_factor` must be in the open interval (0, 1), "
-                f"got {decrease_factor}."
-            )
-        if slow_start_multiplier <= 1.0:
-            raise ValueError(
-                "`slow_start_multiplier` must be greater than 1.0, "
-                f"got {slow_start_multiplier}."
-            )
+        if gamma <= 0.0:
+            raise ValueError(f"`gamma` must be positive, got {gamma}.")
+        if eps <= 0.0:
+            raise ValueError(f"`eps` must be positive, got {eps}.")
         _validate_stride_bounds(
             min_stride=min_stride,
             max_stride=max_stride,
         )
-        if not min_stride <= slow_start_threshold <= max_stride:
-            raise ValueError(
-                "`slow_start_threshold` must be within "
-                f"[{min_stride}, {max_stride}], got {slow_start_threshold}."
-            )
 
-        self.additive_step = int(additive_step)
-        self.decrease_factor = float(decrease_factor)
-        self.score_threshold = float(score_threshold)
-        self.slow_start_threshold = int(slow_start_threshold)
-        self.slow_start_multiplier = float(slow_start_multiplier)
+        self.alpha = float(alpha)
+        self.gamma = float(gamma)
         self.min_stride = int(min_stride)
         self.max_stride = int(max_stride)
+        self.eps = float(eps)
+        self.reset()
+
+    def reset(self) -> None:
+        self._ema_score: float | None = None
+        self._ema_history: list[float] = []
+        self._novelty_history: list[float] = []
+        self._target_stride_history: list[float] = []
+
+    def _map_novelty_to_target_stride(
+        self,
+        novelty: float,
+    ) -> float:
+        scaled_novelty = math.pow(max(novelty, self.eps), self.gamma)
+        stride_span = float(self.max_stride - self.min_stride)
+        return float(self.min_stride) + (
+            stride_span / (1.0 + scaled_novelty)
+        )
 
     def __call__(
         self,
@@ -79,21 +83,43 @@ class RenoStrideController:
             min_stride=self.min_stride,
             max_stride=self.max_stride,
         )
-        if float(score) >= self.score_threshold:
-            next_stride = max(
-                self.min_stride,
-                int(stride * self.decrease_factor),
-            )
-        elif stride < self.slow_start_threshold:
-            next_stride = max(
-                stride + 1,
-                int(math.ceil(stride * self.slow_start_multiplier)),
-            )
-        else:
-            next_stride = stride + self.additive_step
+        score_value = max(float(score), 0.0)
 
-        return _clamp_stride(
-            next_stride,
+        if self._ema_score is None:
+            self._ema_score = max(score_value, self.eps)
+            self._ema_history.append(self._ema_score)
+            self._novelty_history.append(1.0)
+            self._target_stride_history.append(float(stride))
+            return stride
+
+        baseline = max(self._ema_score, self.eps)
+        novelty = max(score_value / baseline, self.eps)
+        target_stride = self._map_novelty_to_target_stride(novelty)
+        # Blend toward an absolute target stride instead of multiplying the
+        # current stride. This avoids runaway growth and makes recovery from
+        # a temporary spike much easier.
+        mapped_stride = (
+            (1.0 - self.alpha) * float(stride)
+            + self.alpha * target_stride
+        )
+        next_stride = _clamp_stride(
+            int(round(mapped_stride)),
             min_stride=self.min_stride,
             max_stride=self.max_stride,
         )
+
+        self._ema_score = (
+            self.alpha * score_value
+            + (1.0 - self.alpha) * self._ema_score
+        )
+        self._ema_history.append(self._ema_score)
+        self._novelty_history.append(novelty)
+        self._target_stride_history.append(target_stride)
+        return next_stride
+
+    def get_diagnostics(self) -> dict[str, list[float]]:
+        return {
+            "ema_history": list(self._ema_history),
+            "novelty_history": list(self._novelty_history),
+            "target_stride_history": list(self._target_stride_history),
+        }
