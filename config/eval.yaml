@@ -33,3 +33,24 @@ nextqa:
   progress_interval: 10 # tqdm update interval
   start_index: 0 # first sample index
   limit: 300 # sample limit, set null for full evaluation
+
+videomme:
+  dataset_root: "/content/drive/MyDrive/Video-MME" # Colab + Google Drive default root
+  annotation_file: "/content/drive/MyDrive/Video-MME/test-00000-of-00001.parquet"
+  videos_dir: "/content/drive/MyDrive/Video-MME/data"
+  video_map_file: null # optional json/csv mapping when the parquet `videoID` does not directly match filenames
+  output_dir: "./eval/result"
+  output_file: "./eval/result/videomme_results.json"
+  debug_output_file: "./eval/result/videomme_debug.jsonl"
+  start_index: 0
+  limit: null
+
+mvbench:
+  dataset_root: "/content/drive/MyDrive/MVBench"
+  annotations_dir: "/content/drive/MyDrive/MVBench/json"
+  data_dir: "/content/drive/MyDrive/MVBench/data"
+  tasks: [] # empty -> run all tasks, or pass [action_sequence]
+  output_dir: "./eval/result"
+  output_file: "./eval/result/mvbench_eval.jsonl"
+  start_index: 0
+  limit: null
