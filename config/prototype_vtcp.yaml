@@ -1,0 +1,72 @@
+defaults:
+  - base
+  - _self_
+
+frame_selection:
+  _target_: model.FrameSelection.prototype_VTCP.selection.vtcp_sampling
+  _partial_: true
+  query_file: ${invoke.query_file}
+  num_frames: 8
+  alpha: 0.5 # z_k 계산에서의 query relevance의 factor
+  beta: 0.25 # z_k 계산에서의 frame intrinsic importance의 factor
+  gamma: 0.25 # z_k 계산에서의 novelty의 factor 
+  delta_i: 0.25 # intrinsic importance 와 query relevance 관게에서 intrinsic importance의 가중치 
+  delta_n: 0.25 # novelty와 와 query relevance 관게에서 novelty의 가중치 
+  rho: 0.9 # frame intrinsic importance에서 기존 frame embedding의 평균에 대한 가중치 
+  tau_seconds: 1.0 # 초 단위, 시간 감쇠 
+  s_min: 4 # 최소 stride
+  s_max: 32 # 최대 stride
+  stride_power: 1.0 # score에 기반한 stride 계산 식에서 stride의 power ( (1-\bar{z})^p 에서 p )
+  score_smoothing_lambda: 0.7 # score가 갑자기 튀는 것을 위한 smoothing의 factor 
+  theta0: 0.55 # z_k에 대한 default threshold value
+  eta: 0.05 # 뽑았어야할 frame과 실제 뽑은 frame 개수 차이의 factor 
+  threshold_min: 0.2 # dynamic threshold의 하한 
+  threshold_max: 1.0 # dynamic threshold의 상한 
+  hysteresis_gap: 0.05 # threshold를 직전선택에서 추적하여 결정      
+  duplicate_sim_threshold: 0.95 
+  t_max: 40 # frame을 select하지 않을 수 있는 최대 공백 
+  start_index: 0 
+  max_steps: null 
+  fill_to_budget: true 
+  max_side: 720
+  ensure_qwen_compatibility: true
+  qwen_factor: 28
+
+patch_selection: null
+
+vlm:
+  _target_: model.FrameSelection.prototype_VTCP.vlm.VTCPVLM
+  model_id: "Qwen/Qwen3-VL-8B-Instruct"
+  backend: "qwen3_vl"
+  dtype: "bf16"
+  quantization:
+    enabled: true
+    mode: "4bit"
+    skip_vision_encoder: true
+    skip_modules: []
+    kwargs:
+      bnb_4bit_compute_dtype: "bf16"
+      bnb_4bit_quant_type: "nf4"
+      bnb_4bit_use_double_quant: true
+      llm_int8_threshold: 6.0
+      llm_int8_enable_fp32_cpu_offload: false
+  frame_selector: ${frame_selection}
+  patch_selector: ${patch_selection}
+  processor_kwargs: {}
+  model_kwargs: {}
+  local_model_dir: "./model/repo"
+  generation_kwargs:
+    do_sample: false
+    max_new_tokens: 128
+  embedding_model_id: "google/siglip-so400m-patch14-384"
+  embedding_dtype: "bf16"
+  embedding_processor_kwargs: {}
+  embedding_model_kwargs: {}
+  embedding_local_model_dir: "./model/repo"
+
+invoke:
+  video_path: "./data/fcN5HGqVzC0.mp4"
+  prompt_file: "model/base/prompt.txt"
+  query_file: "model/base/query.txt"
+  print_config: false
+  quiet_model_loading: false

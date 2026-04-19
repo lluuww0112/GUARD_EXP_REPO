@@ -39,9 +39,9 @@ vlm:
   model_kwargs: {}
   local_model_dir: "./model/repo"
   generation_kwargs:
-    do_sample: true
-    top_p: 0.8
-    max_new_tokens: 256
+    do_sample: false
+    # top_p: 0.8
+    max_new_tokens: 128
   embedding_model_id: "google/siglip-so400m-patch14-384"
   embedding_dtype: "bf16"
   embedding_processor_kwargs: {}
