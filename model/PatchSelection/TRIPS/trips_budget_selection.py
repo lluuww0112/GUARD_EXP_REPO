@@ -131,6 +131,7 @@ def budget_fuse_patch_selection(
     query_file: str,
     clip_model_name: str = "openai/clip-vit-base-patch16",
     clip_dtype: str | torch.dtype | None = None,
+    clip_do_center_crop: bool | None = None,
     keep_ratio: float = 0.05,
     total_budget: int | None = None,
     temperature: float = 0.2,
@@ -178,11 +179,13 @@ def budget_fuse_patch_selection(
         clip_model_name,
         selector_device_key,
         clip_dtype_key,
+        clip_do_center_crop,
     )
     text_embeddings = _load_text_embeddings_v2(
         clip_model_name,
         selector_device_key,
         clip_dtype_key,
+        clip_do_center_crop,
         queries,
     )
     frame_arrays = _prepare_frame_arrays(scoring_frames)
@@ -315,6 +318,9 @@ def budget_fuse_patch_selection(
         "selector_variant": "frame_aware_budget_plus_global_fuse",
         "clip_model_name": clip_model_name,
         "clip_dtype": clip_dtype_key,
+        "clip_do_center_crop": (
+            None if clip_do_center_crop is None else bool(clip_do_center_crop)
+        ),
         "query_file": str(Path(query_file).expanduser()),
         "queries": list(queries),
         "query_count": len(queries),
