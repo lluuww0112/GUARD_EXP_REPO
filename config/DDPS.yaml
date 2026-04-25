@@ -20,9 +20,10 @@ patch_selection_v1:
   _target_: model.PatchSelection.DenseDPS.selection_v1.maskclip_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
-  clip_model_name: "openai/clip-vit-base-patch16"
+  clip_model_name: "openai/clip-vit-large-patch14"
   clip_dtype: "bf16"
-  keep_ratio: 0.075
+  clip_do_center_crop: false # false면 CLIP dense score를 full-frame 기준으로 계산
+  keep_ratio: 0.3
   selection_mode: "naive_mean" # Enum["naive_mean" | "sliding_window"], naive_mean -> 단순 평균 산출, sliding_window -> 경계 정보 보전하며 윈도우 슬라이딩으로 패치 스코어 산출
   window_size: 4
   window_stride: 2 
@@ -36,11 +37,12 @@ patch_selection_v2: # 프레임 중요도에 따른 budget 분배
   _target_: model.PatchSelection.DenseDPS.selection_v2.maskclip_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
-  clip_model_name: "openai/clip-vit-base-patch16"
+  clip_model_name: "openai/clip-vit-large-patch14"
   clip_dtype: "bf16"
+  clip_do_center_crop: false # false면 CLIP dense score를 full-frame 기준으로 계산
   total_budget: null # null이면 keep_ratio * 전체 merged token 수로 총 예산 산출
-  keep_ratio: 0.075
-  temperature: 0.2 # 작을수록 high-score frame에 budget 집중, 상위 프레임만 강하게 주려면 0.1~0.2정도
+  keep_ratio: 0.3
+  temperature: 0.4 # 작을수록 high-score frame에 budget 집중, 상위 프레임만 강하게 주려면 0.1~0.2정도
   selection_mode: "naive_mean"
   window_size: 4
   window_stride: 2
@@ -54,12 +56,13 @@ patch_selection_v3: # threshold 기반 eligible patch만 남기고 leftover budg
   _target_: model.PatchSelection.DenseDPS.selection_v3.maskclip_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
-  clip_model_name: "openai/clip-vit-base-patch16"
+  clip_model_name: "openai/clip-vit-large-patch14"
   clip_dtype: "bf16"
+  clip_do_center_crop: false # false면 CLIP dense score를 full-frame 기준으로 계산
   total_budget: null # null이면 keep_ratio * 전체 merged token 수로 총 예산 산출
-  keep_ratio: 0.2
-  temperature: 0.3 # 작을수록 high-score frame에 budget 집중, 상위 프레임만 강하게 주려면 0.1 ~ 0.2정도
-  patch_score_threshold: 0.03 # raw cosine threshold, null 불가, 예: 0.0 / 0.1 / 0.2
+  keep_ratio: 0.3
+  temperature: 0.4 # 작을수록 high-score frame에 budget 집중, 상위 프레임만 강하게 주려면 0.1 ~ 0.2정도
+  patch_score_threshold: 0.01 # raw cosine threshold, null 불가, 예: 0.0 / 0.1 / 0.2
   selection_mode: "naive_mean"
   window_size: 4
   window_stride: 2

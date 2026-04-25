@@ -23,6 +23,7 @@ patch_selection_v1:
   query_file: ${invoke.query_file}
   clip_model_name: "openai/clip-vit-base-patch16"
   clip_dtype: "bf16"
+  clip_do_center_crop: false # false면 CLIP dense score를 full-frame 기준으로 계산
   # Prioritize LLM Tok/s by keeping very few attentive tokens.
   keep_ratio: 0.03
   attentive_budget: null
@@ -46,6 +47,7 @@ patch_selection_v2:
   query_file: ${invoke.query_file}
   clip_model_name: "openai/clip-vit-base-patch16"
   clip_dtype: "bf16"
+  clip_do_center_crop: false # false면 CLIP dense score를 full-frame 기준으로 계산
   total_budget: null
   keep_ratio: 0.05
   temperature: 0.4

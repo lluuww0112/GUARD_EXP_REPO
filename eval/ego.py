@@ -22,6 +22,7 @@ from tqdm.auto import tqdm
 from model.invoke import build_vlm, suppress_model_loading_output
 from eval.runtime_metrics import (
     extract_runtime_metrics,
+    format_runtime_summary_lines,
     init_runtime_metric_totals,
     summarize_runtime_metric_totals,
     update_runtime_metric_totals,
@@ -714,24 +715,8 @@ def main(config: DictConfig) -> None:
         else:
             print("Accuracy     : N/A (no ground-truth labels found)")
         runtime_summary = summarize_runtime_metric_totals(runtime_metric_totals)
-        avg_input_length = runtime_summary["avg_llm_input_sequence_length"]
-        if avg_input_length is None:
-            print("Avg LLM Seq  : N/A")
-        else:
-            print(
-                "Avg LLM Seq  : "
-                f"{avg_input_length:.2f} "
-                f"(n={runtime_summary['llm_input_sequence_length_samples']})"
-            )
-        avg_reallocated = runtime_summary["avg_reallocated_patch_count"]
-        if avg_reallocated is None:
-            print("Avg Realloc  : N/A")
-        else:
-            print(
-                "Avg Realloc  : "
-                f"{avg_reallocated:.2f} "
-                f"(n={runtime_summary['reallocated_patch_samples']})"
-            )
+        for label, formatted_value in format_runtime_summary_lines(runtime_summary):
+            print(f"{label:<13}: {formatted_value}")
     finally:
         temp_dir.cleanup()
 

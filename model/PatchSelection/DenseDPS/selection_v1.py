@@ -220,9 +220,12 @@ def _load_maskclip_components(
     clip_model_name: str,
     device_type: str,
     clip_dtype_key: str,
+    clip_do_center_crop: bool | None,
 ) -> tuple[CLIPImageProcessor, Any, CLIPVisionModel, CLIPTextModel]:
     clip_dtype, _ = _resolve_clip_dtype(clip_dtype_key)
     image_processor = CLIPImageProcessor.from_pretrained(clip_model_name)
+    if clip_do_center_crop is not None:
+        image_processor.do_center_crop = bool(clip_do_center_crop)
     tokenizer = AutoTokenizer.from_pretrained(clip_model_name)
     vision_model = CLIPVisionModel(clip_model_name)
     text_model = CLIPTextModel(clip_model_name)
@@ -241,6 +244,7 @@ def preload_maskclip_patch_selection(
     *,
     clip_model_name: str = "openai/clip-vit-base-patch16",
     clip_dtype: str | torch.dtype | None = None,
+    clip_do_center_crop: bool | None = None,
     device: str | torch.device | None = None,
     model: Any,
     **_: Any,
@@ -252,7 +256,12 @@ def preload_maskclip_patch_selection(
     )
     device_key = _resolve_device_key(preload_device)
     _, clip_dtype_key = _resolve_clip_dtype(clip_dtype)
-    _load_maskclip_components(clip_model_name, device_key, clip_dtype_key)
+    _load_maskclip_components(
+        clip_model_name,
+        device_key,
+        clip_dtype_key,
+        clip_do_center_crop,
+    )
 
 
 def _encode_text_queries(
@@ -279,12 +288,14 @@ def _load_text_embeddings(
     clip_model_name: str,
     device_key: str,
     clip_dtype_key: str,
+    clip_do_center_crop: bool | None,
     queries: tuple[str, ...],
 ) -> torch.Tensor:
     _, tokenizer, _, text_model = _load_maskclip_components(
         clip_model_name,
         device_key,
         clip_dtype_key,
+        clip_do_center_crop,
     )
     return _encode_text_queries(
         queries,
@@ -639,6 +650,7 @@ def maskclip_patch_selection(
     query_file: str,
     clip_model_name: str = "openai/clip-vit-base-patch16",
     clip_dtype: str | torch.dtype | None = None,
+    clip_do_center_crop: bool | None = None,
     keep_ratio: float = 0.5,
     selection_mode: str = "naive_mean",
     window_size: int = 2,
@@ -686,12 +698,14 @@ def maskclip_patch_selection(
         clip_model_name,
         selector_device_key,
         clip_dtype_key,
+        clip_do_center_crop,
     )
 
     text_embeddings = _load_text_embeddings(
         clip_model_name,
         selector_device_key,
         clip_dtype_key,
+        clip_do_center_crop,
         queries,
     )
     frame_arrays = _prepare_frame_arrays(scoring_frames)
@@ -765,6 +779,9 @@ def maskclip_patch_selection(
         "selection_mode": resolved_selection_mode,
         "clip_model_name": clip_model_name,
         "clip_dtype": clip_dtype_key,
+        "clip_do_center_crop": (
+            None if clip_do_center_crop is None else bool(clip_do_center_crop)
+        ),
         "query_file": str(Path(query_file).expanduser()),
         "queries": list(queries),
         "query_count": len(queries),

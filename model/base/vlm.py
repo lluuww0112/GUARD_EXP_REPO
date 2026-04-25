@@ -899,7 +899,6 @@ class BaseVLM(VLMInterface):
         self.last_timing_info = {
             "path": "standard_generation",
             "llm_generate_seconds": generate_elapsed,
-            "input_sequence_length": int(prompt_length),
             "generated_tokens": generated_tokens,
         }
         return self._decode_generation_output(output_ids, prompt_length=prompt_length)
@@ -1293,14 +1292,12 @@ class BaseVLM(VLMInterface):
             "backend": self.backend,
             **extraction_metadata,
             **pruning_metadata,
-            "reallocated_token_count": selector_metadata.get("reallocated_token_count"),
             "selector_metadata": selector_metadata,
             "selector_output_keys": sorted(selector_metadata.keys()),
         }
         self.last_timing_info = {
             "path": "patch_selection_generation",
             "llm_generate_seconds": generate_elapsed,
-            "input_sequence_length": int(prompt_length),
             "generated_tokens": generated_tokens,
         }
         return self._decode_generation_output(output_ids, prompt_length=prompt_length)

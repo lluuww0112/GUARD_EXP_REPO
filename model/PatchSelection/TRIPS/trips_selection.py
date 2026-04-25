@@ -237,9 +237,12 @@ def _load_trips_components(
     clip_model_name: str,
     device_key: str,
     clip_dtype_key: str,
+    clip_do_center_crop: bool | None,
 ) -> tuple[CLIPImageProcessor, Any, CLIPVisionModel_v2, CLIPTextModel]:
     clip_dtype, _ = _resolve_clip_dtype(clip_dtype_key)
     image_processor = CLIPImageProcessor.from_pretrained(clip_model_name)
+    if clip_do_center_crop is not None:
+        image_processor.do_center_crop = bool(clip_do_center_crop)
     tokenizer = AutoTokenizer.from_pretrained(clip_model_name)
     vision_model = CLIPVisionModel_v2(clip_model_name)
     text_model = CLIPTextModel(clip_model_name)
@@ -258,6 +261,7 @@ def preload_trips_patch_selection(
     *,
     clip_model_name: str = "openai/clip-vit-base-patch16",
     clip_dtype: str | torch.dtype | None = None,
+    clip_do_center_crop: bool | None = None,
     device: str | torch.device | None = None,
     model: Any,
     **_: Any,
@@ -267,7 +271,12 @@ def preload_trips_patch_selection(
     )
     device_key = _resolve_device_key(preload_device)
     _, clip_dtype_key = _resolve_clip_dtype(clip_dtype)
-    _load_trips_components(clip_model_name, device_key, clip_dtype_key)
+    _load_trips_components(
+        clip_model_name,
+        device_key,
+        clip_dtype_key,
+        clip_do_center_crop,
+    )
 
 
 def _encode_text_queries(
@@ -602,6 +611,7 @@ def trips_patch_selection(
     query_file: str,
     clip_model_name: str = "openai/clip-vit-base-patch16",
     clip_dtype: str | torch.dtype | None = None,
+    clip_do_center_crop: bool | None = None,
     keep_ratio: float = 0.25,
     attentive_budget: int | None = None,
     max_attentive_budget: int | None = None,
@@ -665,6 +675,7 @@ def trips_patch_selection(
         clip_model_name,
         selector_device_key,
         clip_dtype_key,
+        clip_do_center_crop,
     )
     text_embeddings = _encode_text_queries(
         queries=queries,
@@ -892,6 +903,9 @@ def trips_patch_selection(
         "selector_variant": "paper_style_keep_and_fuse",
         "clip_model_name": clip_model_name,
         "clip_dtype": clip_dtype_key,
+        "clip_do_center_crop": (
+            None if clip_do_center_crop is None else bool(clip_do_center_crop)
+        ),
         "query_file": str(Path(query_file).expanduser()),
         "queries": list(queries),
         "query_count": len(queries),
