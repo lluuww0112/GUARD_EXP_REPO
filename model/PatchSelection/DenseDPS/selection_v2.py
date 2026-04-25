@@ -14,6 +14,7 @@ from .cilp_model import CLIPTextModel, CLIPVisionModel_v2
 from .selection_v1 import (
     _aggregate_query_scores,
     _align_temporal_score_maps,
+    _configure_clip_image_processor,
     _coerce_video_frames,
     _compute_qwen_merge_mean_scores,
     _compute_sliding_window_merged_scores,
@@ -44,8 +45,10 @@ def _load_maskclip_components_v2(
 ) -> tuple[CLIPImageProcessor, Any, CLIPVisionModel_v2, CLIPTextModel]:
     clip_dtype, _ = _resolve_clip_dtype(clip_dtype_key)
     image_processor = CLIPImageProcessor.from_pretrained(clip_model_name)
-    if clip_do_center_crop is not None:
-        image_processor.do_center_crop = bool(clip_do_center_crop)
+    image_processor = _configure_clip_image_processor(
+        image_processor,
+        clip_do_center_crop=clip_do_center_crop,
+    )
     tokenizer = AutoTokenizer.from_pretrained(clip_model_name)
     vision_model = CLIPVisionModel_v2(clip_model_name)
     text_model = CLIPTextModel(clip_model_name)

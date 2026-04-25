@@ -13,6 +13,7 @@ from transformers import AutoTokenizer, CLIPImageProcessor
 from ...base.selection import FrameSelectionResult, PatchSelectionResult
 from model.PatchSelection.DenseDPS.cilp_model import CLIPTextModel, CLIPVisionModel_v2
 from model.PatchSelection.DenseDPS.selection_v1 import (
+    _configure_clip_image_processor,
     _expand_scores_for_frame_duplication,
     _resolve_patch_scoring_frames,
 )
@@ -241,8 +242,10 @@ def _load_trips_components(
 ) -> tuple[CLIPImageProcessor, Any, CLIPVisionModel_v2, CLIPTextModel]:
     clip_dtype, _ = _resolve_clip_dtype(clip_dtype_key)
     image_processor = CLIPImageProcessor.from_pretrained(clip_model_name)
-    if clip_do_center_crop is not None:
-        image_processor.do_center_crop = bool(clip_do_center_crop)
+    image_processor = _configure_clip_image_processor(
+        image_processor,
+        clip_do_center_crop=clip_do_center_crop,
+    )
     tokenizer = AutoTokenizer.from_pretrained(clip_model_name)
     vision_model = CLIPVisionModel_v2(clip_model_name)
     text_model = CLIPTextModel(clip_model_name)

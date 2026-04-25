@@ -25,6 +25,36 @@ CLIP_DTYPE_MAP = {
 }
 
 
+def _configure_clip_image_processor(
+    image_processor: CLIPImageProcessor,
+    *,
+    clip_do_center_crop: bool | None,
+) -> CLIPImageProcessor:
+    if clip_do_center_crop is not None:
+        image_processor.do_center_crop = bool(clip_do_center_crop)
+
+    # CLIP ViTs expect a fixed input resolution. When center crop is disabled,
+    # the stock processor keeps aspect ratio via `shortest_edge`, which can
+    # yield non-square inputs like 224x303 and break the vision encoder.
+    if not bool(getattr(image_processor, "do_center_crop", True)):
+        crop_size = getattr(image_processor, "crop_size", {}) or {}
+        resize_size = getattr(image_processor, "size", {}) or {}
+        target_height = crop_size.get("height") or resize_size.get("height")
+        target_width = crop_size.get("width") or resize_size.get("width")
+        if target_height is None:
+            target_height = resize_size.get("shortest_edge")
+        if target_width is None:
+            target_width = resize_size.get("shortest_edge")
+        if target_height is not None and target_width is not None:
+            image_processor.do_resize = True
+            image_processor.size = {
+                "height": int(target_height),
+                "width": int(target_width),
+            }
+
+    return image_processor
+
+
 def _resolve_device(
     device: str | torch.device | None,
     reference_tensor: torch.Tensor,
@@ -224,8 +254,10 @@ def _load_maskclip_components(
 ) -> tuple[CLIPImageProcessor, Any, CLIPVisionModel, CLIPTextModel]:
     clip_dtype, _ = _resolve_clip_dtype(clip_dtype_key)
     image_processor = CLIPImageProcessor.from_pretrained(clip_model_name)
-    if clip_do_center_crop is not None:
-        image_processor.do_center_crop = bool(clip_do_center_crop)
+    image_processor = _configure_clip_image_processor(
+        image_processor,
+        clip_do_center_crop=clip_do_center_crop,
+    )
     tokenizer = AutoTokenizer.from_pretrained(clip_model_name)
     vision_model = CLIPVisionModel(clip_model_name)
     text_model = CLIPTextModel(clip_model_name)
