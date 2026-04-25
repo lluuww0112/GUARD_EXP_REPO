@@ -32,7 +32,7 @@ nextqa:
   resume: false # resume from existing output file
   progress_interval: 10 # tqdm update interval
   start_index: 0 # first sample index
-  limit: 300 # sample limit, set null for full evaluation
+  limit: null # sample limit, set null for full evaluation
 
 videomme:
   dataset_root: "/content/drive/MyDrive/Video-MME" # Colab + Google Drive default root

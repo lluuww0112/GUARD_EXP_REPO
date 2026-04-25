@@ -20,6 +20,12 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 
 from model.invoke import build_vlm, suppress_model_loading_output
+from eval.runtime_metrics import (
+    extract_runtime_metrics,
+    init_runtime_metric_totals,
+    summarize_runtime_metric_totals,
+    update_runtime_metric_totals,
+)
 
 
 QUESTION_FILE_CANDIDATES = ("question.json", "questions.json")
@@ -625,6 +631,7 @@ def main(config: DictConfig) -> None:
         parse_failures = 0
         labeled_count = 0
         correct = 0
+        runtime_metric_totals = init_runtime_metric_totals()
 
         progress_bar = tqdm(
             pending_samples,
@@ -654,6 +661,8 @@ def main(config: DictConfig) -> None:
                 video_path=str(sample.video_path),
                 prompt=prompt,
             )
+            runtime_metrics = extract_runtime_metrics(vlm)
+            update_runtime_metric_totals(runtime_metric_totals, runtime_metrics)
             prediction, parse_method = _parse_prediction_index(response, sample.options)
             if prediction is None:
                 parse_failures += 1
@@ -679,6 +688,7 @@ def main(config: DictConfig) -> None:
                 "response": response,
                 "uid_metadata": sample.uid_metadata,
                 "dynamic_query_file": str(dynamic_query_file) if dynamic_query_enabled else None,
+                **runtime_metrics,
             }
             _write_result(output_path, result)
             completed += 1
@@ -703,6 +713,25 @@ def main(config: DictConfig) -> None:
             print(f"Accuracy     : {correct / labeled_count:.4f}")
         else:
             print("Accuracy     : N/A (no ground-truth labels found)")
+        runtime_summary = summarize_runtime_metric_totals(runtime_metric_totals)
+        avg_input_length = runtime_summary["avg_llm_input_sequence_length"]
+        if avg_input_length is None:
+            print("Avg LLM Seq  : N/A")
+        else:
+            print(
+                "Avg LLM Seq  : "
+                f"{avg_input_length:.2f} "
+                f"(n={runtime_summary['llm_input_sequence_length_samples']})"
+            )
+        avg_reallocated = runtime_summary["avg_reallocated_patch_count"]
+        if avg_reallocated is None:
+            print("Avg Realloc  : N/A")
+        else:
+            print(
+                "Avg Realloc  : "
+                f"{avg_reallocated:.2f} "
+                f"(n={runtime_summary['reallocated_patch_samples']})"
+            )
     finally:
         temp_dir.cleanup()
 

@@ -57,8 +57,8 @@ patch_selection_v3: # threshold 기반 eligible patch만 남기고 leftover budg
   clip_model_name: "openai/clip-vit-base-patch16"
   clip_dtype: "bf16"
   total_budget: null # null이면 keep_ratio * 전체 merged token 수로 총 예산 산출
-  keep_ratio: 0.075
-  temperature: 0.2 # 작을수록 high-score frame에 budget 집중, 상위 프레임만 강하게 주려면 0.1 ~ 0.2정도
+  keep_ratio: 0.2
+  temperature: 0.3 # 작을수록 high-score frame에 budget 집중, 상위 프레임만 강하게 주려면 0.1 ~ 0.2정도
   patch_score_threshold: 0.03 # raw cosine threshold, null 불가, 예: 0.0 / 0.1 / 0.2
   selection_mode: "naive_mean"
   window_size: 4

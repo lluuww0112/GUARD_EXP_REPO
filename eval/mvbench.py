@@ -23,6 +23,12 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm.auto import tqdm
 
 from model.invoke import build_vlm, suppress_model_loading_output
+from eval.runtime_metrics import (
+    extract_runtime_metrics,
+    init_runtime_metric_totals,
+    summarize_runtime_metric_totals,
+    update_runtime_metric_totals,
+)
 
 
 VIDEO_DIR_CANDIDATES = ("data", "videos", "video")
@@ -590,6 +596,7 @@ def main(config: DictConfig) -> None:
 
         preload_runtime_resources = getattr(vlm, "preload_runtime_resources", None)
         preloaded = False
+        runtime_metric_totals = init_runtime_metric_totals()
 
         progress_bar = tqdm(samples, desc="MVBench Eval", unit="sample", dynamic_ncols=True, disable=len(samples) == 0)
         for sample in progress_bar:
@@ -603,6 +610,8 @@ def main(config: DictConfig) -> None:
                 preloaded = True
 
             response = vlm.answer(video_path=str(clip_path), prompt=prompt)
+            runtime_metrics = extract_runtime_metrics(vlm)
+            update_runtime_metric_totals(runtime_metric_totals, runtime_metrics)
             prediction_letter, prediction_index, parse_method = _parse_prediction(response, sample.candidates)
             ground_truth_letter = _option_letter(sample.answer_index)
             is_correct = (
@@ -636,6 +645,7 @@ def main(config: DictConfig) -> None:
                     "end": sample.end,
                     "raw_item": sample.raw_item,
                     "dynamic_query_file": str(dynamic_query_file) if dynamic_query_enabled else None,
+                    **runtime_metrics,
                 }
             )
         progress_bar.close()
@@ -652,6 +662,25 @@ def main(config: DictConfig) -> None:
     print(f"Correct      : {eval_stats['correct']}/{eval_stats['total']}")
     print(f"Accuracy     : {eval_stats['accuracy']:.4f}")
     print(f"Answer Rate  : {eval_stats['answer_rate']:.4f}")
+    runtime_summary = summarize_runtime_metric_totals(runtime_metric_totals)
+    avg_input_length = runtime_summary["avg_llm_input_sequence_length"]
+    if avg_input_length is None:
+        print("Avg LLM Seq  : N/A")
+    else:
+        print(
+            "Avg LLM Seq  : "
+            f"{avg_input_length:.2f} "
+            f"(n={runtime_summary['llm_input_sequence_length_samples']})"
+        )
+    avg_reallocated = runtime_summary["avg_reallocated_patch_count"]
+    if avg_reallocated is None:
+        print("Avg Realloc  : N/A")
+    else:
+        print(
+            "Avg Realloc  : "
+            f"{avg_reallocated:.2f} "
+            f"(n={runtime_summary['reallocated_patch_samples']})"
+        )
     print(f"Output File  : {output_path}")
     if eval_stats["parse_methods"]:
         print("Parse Stats  :")
