@@ -1,4 +1,9 @@
-from .selection import vtcp_select_from_pool, vtcp_sampling
+from .selection import visualize_vtcp_selection, vtcp_select_from_pool, vtcp_sampling
 from .vlm import VTCPVLM
 
-__all__ = ["VTCPVLM", "vtcp_select_from_pool", "vtcp_sampling"]
+__all__ = [
+    "VTCPVLM",
+    "visualize_vtcp_selection",
+    "vtcp_select_from_pool",
+    "vtcp_sampling",
+]

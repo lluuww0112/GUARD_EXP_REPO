@@ -1,0 +1,75 @@
+defaults:
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+  - _self_
+
+hydra:
+  job:
+    chdir: false
+  output_subdir: null
+  run:
+    dir: .
+
+frame_selection:
+  _target_: model.FrameSelection.VTCP.vtcp_sampling
+  _partial_: true
+  query_file: ${invoke.query_file} 
+  top_ratio: 0.4
+  min_selected_frames: 4 
+  max_selected_frames: 10 # 최종 선택 프레임 수의 최대값, null이면 상한 없음.
+  similarity_metric: "cos_sim" # Enum[cos_sim / l1 / l2]
+  sma_window: 5
+  sma_warmup_frames: 5
+  query_score_weight: 0.4 # control score에서 query relevance가 차지하는 비중.
+  initial_stride: 1 # SMA 이후 EMA stride controller가 사용할 시작 stride.
+  stride_controller:
+    _target_: model.FrameSelection.VTCP.EMAStrideController
+    alpha: 0.2 # 최근 변화량을 EMA baseline에 얼마나 빠르게 반영할지.
+    gamma: 3 # baseline 대비 novelty에 얼마나 민감하게 stride를 조정할지.
+    min_stride: 1
+    max_stride: 12
+  clip_model_name: "openai/clip-vit-base-patch16" 
+  clip_dtype: "bf16" 
+  clip_batch_size: 512 
+  embedding_frame_stride: 7 # 후보 프레임 선택 stride
+  embedding_max_frames: 2000 # 최대 후보 프레임 갯수
+  max_side: 720 
+  ensure_qwen_compatibility: true
+  qwen_factor: 10
+  store_diagnostics: false # 원시 변화량/제어 점수/쿼리 점수 배열을 metadata에 저장할지 여부.
+
+patch_selection: null
+
+vlm:
+  _target_: model.FrameSelection.VTCP.VTCPVLM
+  model_id: "Qwen/Qwen3-VL-8B-Instruct"
+  backend: "qwen3_vl"
+  dtype: "bf16"
+  quantization:
+    enabled: true
+    mode: "4bit"
+    skip_vision_encoder: true
+    skip_modules: []
+    kwargs:
+      bnb_4bit_compute_dtype: "bf16"
+      bnb_4bit_quant_type: "nf4"
+      bnb_4bit_use_double_quant: true
+      llm_int8_threshold: 6.0
+      llm_int8_enable_fp32_cpu_offload: false
+  frame_selector: ${frame_selection}
+  patch_selector: ${patch_selection}
+  duplicate_factor: 2
+  duplicate_for_qwen_only: true
+  processor_kwargs: {}
+  model_kwargs: {}
+  local_model_dir: "./model/repo"
+  generation_kwargs:
+    do_sample: false
+    max_new_tokens: 128
+
+invoke:
+  video_path: "./data/ydcPPppK7Dg.mp4"
+  prompt_file: "model/base/prompt.txt"
+  query_file: "model/base/query.txt"
+  print_config: false
+  quiet_model_loading: false

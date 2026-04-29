@@ -43,6 +43,7 @@ class VTCPVLM(MDP3VLM):
             self.frame_selector(video_path=video_path, **selector_kwargs),
             video_path=video_path,
         )
+        frame_selection = self._duplicate_frame_selection(frame_selection)
         print("=== VTCP Debug ===")
         print("visited_count:", frame_selection.metadata.get("visited_count"))
         print("selected:", frame_selection.metadata.get("sampled_indices"))
@@ -53,6 +54,7 @@ class VTCPVLM(MDP3VLM):
         if not isinstance(frame_selection, FrameSelectionResult):
             raise TypeError("VTCP frame selector must return a FrameSelectionResult.")
 
+        self.last_frame_selection = frame_selection
         video_tensor = frame_selection.frames
         prompt_text = self._prepare_text_input(
             prompt,

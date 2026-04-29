@@ -1,3 +1,7 @@
+defaults:
+  - override hydra/job_logging: disabled
+  - override hydra/hydra_logging: disabled
+
 hydra:
   job:
     chdir: false
@@ -17,4 +21,36 @@ egoschema:
   resume: false # 이전에 연산해둔거 있으면 이어서 실행
   progress_interval: 10 # tqdm 업데이트 간격
   start_index: 0 # 시작 샘플 인덱스, 즉 limit이 300이면 0~299의 샘플을 사용
-  limit: 300 # 테스트할 샘플 수, null로 설정되면 전체 평가
+  limit: null # 테스트할 샘플 수, null로 설정되면 전체 평가
+
+nextqa:
+  dataset_root: "/content/drive/MyDrive/NExTVideo/nextqa" # Colab + Google Drive default root
+  questions_file: "/content/drive/MyDrive/NExTVideo/nextqa/val.csv"
+  videos_dir: "/content/drive/MyDrive/NExTVideo/nextqa/videos"
+  output_dir: "./eval/result"
+  output_file: "./eval/result/nextqa_pred.jsonl"
+  resume: false # resume from existing output file
+  progress_interval: 10 # tqdm update interval
+  start_index: 0 # first sample index
+  limit: null # sample limit, set null for full evaluation
+
+videomme:
+  dataset_root: "/content/drive/MyDrive/Video-MME" # Colab + Google Drive default root
+  annotation_file: "/content/drive/MyDrive/Video-MME/test-00000-of-00001.parquet"
+  videos_dir: "/content/drive/MyDrive/Video-MME/data"
+  video_map_file: null # optional json/csv mapping when the parquet `videoID` does not directly match filenames
+  output_dir: "./eval/result"
+  output_file: "./eval/result/videomme_results.json"
+  debug_output_file: "./eval/result/videomme_debug.jsonl"
+  start_index: 0
+  limit: null
+
+mvbench:
+  dataset_root: "/content/drive/MyDrive/MVBench"
+  annotations_dir: "/content/drive/MyDrive/MVBench/json"
+  data_dir: "/content/drive/MyDrive/MVBench/data"
+  tasks: [] # empty -> run all tasks, or pass [action_sequence]
+  output_dir: "./eval/result"
+  output_file: "./eval/result/mvbench_eval.jsonl"
+  start_index: 0
+  limit: null

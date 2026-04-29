@@ -70,8 +70,12 @@ class MDP3VLM(BaseVLM):
             model_kwargs.setdefault("torch_dtype", self.embedding_dtype)
         embedding_model = AutoModel.from_pretrained(source, **model_kwargs)
 
-        device = self.model.device if torch.cuda.is_available() else torch.device("cpu")
-        embedding_model.to(device)
+        device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        try:
+            embedding_model.to(device)
+        except RuntimeError:
+            fallback_device = self.model.device if torch.cuda.is_available() else torch.device("cpu")
+            embedding_model.to(fallback_device)
         embedding_model.eval()
         return processor, embedding_model
 

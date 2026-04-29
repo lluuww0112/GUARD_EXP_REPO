@@ -1,0 +1,74 @@
+defaults:
+  - base
+  - _self_
+
+frame_selection:
+  _target_: model.FrameSelection.prototype_VTCP.selection.vtcp_sampling
+  _partial_: true
+  query_file: ${invoke.query_file}
+  num_frames: 10
+  alpha: 0.75
+  beta: 0.05
+  gamma: 0.20
+  delta_i: 0.25
+  delta_n: 0.25
+  rho: 0.9
+  tau_seconds: 1.0
+  s_min: 4
+  s_max: 32
+  stride_power: 1.0
+  score_smoothing_lambda: 0.7
+  theta0: 0.57
+  eta: 0.0
+  threshold_min: 0.2
+  threshold_max: 1.0
+  hysteresis_gap: 0.0
+  duplicate_sim_threshold: 0.95
+  t_max: 40
+  start_index: 0
+  max_steps: null
+  fill_to_budget: true
+  max_side: 720
+  ensure_qwen_compatibility: false
+  qwen_factor: 28
+
+patch_selection: null
+
+vlm:
+  _target_: model.FrameSelection.llavaone_VTCP.vlm.LlavaOneVisionVTCPVLM
+  model_id: "llava-hf/llava-onevision-qwen2-7b-ov-hf"
+  backend: "llava_onevision"
+  dtype: "bf16"
+  quantization:
+    enabled: true
+    mode: "4bit"
+    skip_vision_encoder: true
+    skip_modules: []
+    kwargs:
+      bnb_4bit_compute_dtype: "bf16"
+      bnb_4bit_quant_type: "nf4"
+      bnb_4bit_use_double_quant: true
+      llm_int8_threshold: 6.0
+      llm_int8_enable_fp32_cpu_offload: false
+  frame_selector: ${frame_selection}
+  patch_selector: ${patch_selection}
+  duplicate_factor: 1
+  duplicate_for_qwen_only: true
+  processor_kwargs: {}
+  model_kwargs: {}
+  local_model_dir: "./model/repo"
+  generation_kwargs:
+    do_sample: false
+    max_new_tokens: 128
+  embedding_model_id: "google/siglip-so400m-patch14-384"
+  embedding_dtype: "bf16"
+  embedding_processor_kwargs: {}
+  embedding_model_kwargs: {}
+  embedding_local_model_dir: "./model/repo"
+
+invoke:
+  video_path: "./data/fcN5HGqVzC0.mp4"
+  prompt_file: "model/base/prompt.txt"
+  query_file: "model/base/query.txt"
+  print_config: false
+  quiet_model_loading: false

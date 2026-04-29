@@ -227,8 +227,9 @@ def main(config: DictConfig) -> None:
             print(f"Gen Tokens  : {generated_tokens}")
             if llm_generate_seconds > 0:
                 print(f"LLM Tok/s   : {generated_tokens / llm_generate_seconds:.2f}")
-        
 
+    from model.FrameSelection.prototype_VTCP import visualize_vtcp_selection
+    visualize_vtcp_selection(vlm.last_frame_selection,"outputs/vtcp_timeline.png",)
 
 if __name__ == "__main__":
     main()

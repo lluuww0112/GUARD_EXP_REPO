@@ -38,6 +38,355 @@ class VTCPScore:
     stride: int # 점수와 budget에 기반하여 나온 실제 stride_t+1 
 
 
+def _as_rgb_uint8_frames(frames: torch.Tensor | np.ndarray) -> np.ndarray:
+    if isinstance(frames, torch.Tensor):
+        frames_array = frames.detach().cpu().numpy()
+    else:
+        frames_array = np.asarray(frames)
+
+    if frames_array.ndim != 4:
+        raise ValueError(
+            "`frames` must have shape (T, H, W, C) or (T, C, H, W), "
+            f"got {frames_array.shape}."
+        )
+    if frames_array.shape[-1] not in (1, 3, 4) and frames_array.shape[1] in (1, 3, 4):
+        frames_array = np.transpose(frames_array, (0, 2, 3, 1))
+    if frames_array.shape[-1] == 1:
+        frames_array = np.repeat(frames_array, 3, axis=-1)
+    elif frames_array.shape[-1] == 4:
+        frames_array = frames_array[..., :3]
+
+    if np.issubdtype(frames_array.dtype, np.floating):
+        max_value = float(np.nanmax(frames_array)) if frames_array.size else 1.0
+        if max_value <= 1.0:
+            frames_array = frames_array * 255.0
+    return np.clip(frames_array, 0, 255).astype(np.uint8)
+
+
+def _draw_polyline(
+    canvas: np.ndarray,
+    points: list[tuple[int, int]],
+    color: tuple[int, int, int],
+    *,
+    thickness: int = 2,
+    dashed: bool = False,
+) -> None:
+    if len(points) < 2:
+        return
+    for start, end in zip(points[:-1], points[1:], strict=False):
+        if not dashed:
+            cv2.line(canvas, start, end, color, thickness, lineType=cv2.LINE_AA)
+            continue
+
+        x1, y1 = start
+        x2, y2 = end
+        length = max(int(math.hypot(x2 - x1, y2 - y1)), 1)
+        dash = 10
+        gap = 7
+        for offset in range(0, length, dash + gap):
+            ratio_a = offset / length
+            ratio_b = min(offset + dash, length) / length
+            ax = int(round(x1 + (x2 - x1) * ratio_a))
+            ay = int(round(y1 + (y2 - y1) * ratio_a))
+            bx = int(round(x1 + (x2 - x1) * ratio_b))
+            by = int(round(y1 + (y2 - y1) * ratio_b))
+            cv2.line(canvas, (ax, ay), (bx, by), color, thickness, lineType=cv2.LINE_AA)
+
+
+def _draw_star(
+    canvas: np.ndarray,
+    center: tuple[int, int],
+    radius: int,
+    color: tuple[int, int, int],
+    outline: tuple[int, int, int],
+) -> None:
+    cx, cy = center
+    vertices: list[tuple[int, int]] = []
+    for i in range(10):
+        angle = -math.pi / 2 + i * math.pi / 5
+        r = radius if i % 2 == 0 else radius * 0.45
+        vertices.append((int(round(cx + r * math.cos(angle))), int(round(cy + r * math.sin(angle)))))
+    pts = np.array(vertices, dtype=np.int32)
+    cv2.fillPoly(canvas, [pts], color, lineType=cv2.LINE_AA)
+    cv2.polylines(canvas, [pts], isClosed=True, color=outline, thickness=2, lineType=cv2.LINE_AA)
+
+
+def visualize_vtcp_selection(
+    frame_selection: FrameSelectionResult,
+    output_path: str | Path | None = None,
+    *,
+    width: int = 1800,
+    include_frames: bool = True,
+    max_thumbnail_height: int = 140,
+    x_axis: str = "visited",
+    stride_axis_max: float | None = None,
+) -> np.ndarray:
+    """
+    VTCP 선택 결과를 시각화한다.
+
+    x_axis="visited"는 실제 방문한 프레임 범위만 확대해서 보여준다.
+    x_axis="video"로 지정하면 전체 비디오 프레임 범위를 기준으로 그린다.
+    """
+    metadata = frame_selection.metadata
+    trace = metadata.get("score_trace") or []
+    if not trace:
+        raise ValueError("`frame_selection.metadata['score_trace']` is empty.")
+
+    selected_indices = [int(index) for index in metadata.get("sampled_indices", [])]
+    threshold_selected = {
+        int(index) for index in metadata.get("threshold_selected_indices", [])
+    }
+    budget_filled = {int(index) for index in metadata.get("budget_filled_indices", [])}
+    force_selected = {
+        int(record["frame_index"])
+        for record in trace
+        if bool(record.get("force_selected", False))
+    }
+
+    plot_width = int(max(width, 900))
+    margin_left = 85
+    margin_right = 45
+    top_margin = 142
+    panel_gap = 70
+    score_height = 420
+    stride_height = 210
+    frame_gap = 18
+    thumb_label_height = 34
+    use_frames = include_frames and frame_selection.frames is not None
+    thumb_height = int(max_thumbnail_height) if use_frames else 0
+    height = (
+        top_margin
+        + score_height
+        + panel_gap
+        + stride_height
+        + (frame_gap + thumb_height + thumb_label_height if use_frames else 30)
+        + 40
+    )
+    canvas = np.full((height, plot_width, 3), 255, dtype=np.uint8)
+
+    colors = {
+        "axis": (92, 105, 125),
+        "grid": (226, 231, 238),
+        "text": (50, 63, 84),
+        "score": (42, 107, 232),
+        "smoothed": (116, 164, 248),
+        "threshold": (35, 150, 112),
+        "visited": (255, 162, 34),
+        "selected": (232, 50, 49),
+        "budget": (142, 91, 230),
+        "stride": (11, 152, 114),
+        "force": (255, 111, 0),
+    }
+
+    def put_text(
+        text: str,
+        org: tuple[int, int],
+        scale: float = 0.65,
+        color: tuple[int, int, int] | None = None,
+        thickness: int = 1,
+    ) -> None:
+        cv2.putText(
+            canvas,
+            text,
+            org,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            color or colors["text"],
+            thickness,
+            lineType=cv2.LINE_AA,
+        )
+
+    frame_indices = [int(record["frame_index"]) for record in trace]
+    x_min = min(frame_indices)
+    visited_x_max = max(frame_indices + selected_indices)
+    if x_axis == "video":
+        x_max = max(
+            int(metadata.get("total_frames") or visited_x_max),
+            visited_x_max,
+            x_min + 1,
+        )
+    elif x_axis == "visited":
+        pad = max(1, int(round((visited_x_max - x_min) * 0.04)))
+        x_max = max(visited_x_max + pad, x_min + 1)
+    else:
+        raise ValueError("`x_axis` must be either 'visited' or 'video'.")
+    plot_left = margin_left
+    plot_right = plot_width - margin_right
+
+    def map_x(frame_index: int) -> int:
+        ratio = (frame_index - x_min) / max(x_max - x_min, 1)
+        return int(round(plot_left + ratio * (plot_right - plot_left)))
+
+    def map_y(value: float, top: int, panel_height: int, y_min: float, y_max: float) -> int:
+        ratio = (float(value) - y_min) / max(y_max - y_min, 1e-6)
+        ratio = float(np.clip(ratio, 0.0, 1.0))
+        return int(round(top + panel_height - ratio * panel_height))
+
+    def draw_axes(top: int, panel_height: int, *, y_min: float, y_max: float, y_label: str) -> None:
+        cv2.rectangle(
+            canvas,
+            (plot_left, top),
+            (plot_right, top + panel_height),
+            colors["grid"],
+            1,
+            lineType=cv2.LINE_AA,
+        )
+        for tick in range(6):
+            value = y_min + (y_max - y_min) * tick / 5
+            y = map_y(value, top, panel_height, y_min, y_max)
+            cv2.line(canvas, (plot_left, y), (plot_right, y), colors["grid"], 1, lineType=cv2.LINE_AA)
+            put_text(f"{value:.1f}", (18, y + 5), 0.52, colors["axis"])
+        for tick in range(6):
+            frame_index = int(round(x_min + (x_max - x_min) * tick / 5))
+            x = map_x(frame_index)
+            cv2.line(canvas, (x, top), (x, top + panel_height), colors["grid"], 1, lineType=cv2.LINE_AA)
+            put_text(str(frame_index), (x - 18, top + panel_height + 28), 0.52, colors["axis"])
+        put_text(y_label, (14, top - 14), 0.62, colors["axis"], 2)
+        put_text("Original frame index", (plot_left + (plot_right - plot_left) // 2 - 120, top + panel_height + 55), 0.62, colors["axis"], 2)
+
+    title = "VTCP Temporal Timeline"
+    query = str(metadata.get("query_text", "") or "")
+    params = metadata.get("vtcp_params", {}) or {}
+    effective_stride = params.get("s_max")
+    put_text(title, (plot_width // 2 - 175, 42), 0.95, colors["text"], 2)
+    if query:
+        put_text(f"query={query}", (plot_width // 2 - 115, 70), 0.58, colors["text"])
+    summary = (
+        f"visited={metadata.get('visited_count', len(trace))}  "
+        f"selected={len(selected_indices)}  "
+        f"threshold={len(threshold_selected)}  "
+        f"budget_fill={len(budget_filled)}  "
+        f"s_min={params.get('s_min')}  s_max={effective_stride}"
+    )
+    put_text(summary, (plot_left, 105), 0.58, colors["axis"])
+
+    score_top = top_margin
+    draw_axes(score_top, score_height, y_min=0.0, y_max=1.0, y_label="Score")
+    score_points = [
+        (map_x(int(record["frame_index"])), map_y(float(record["score"]), score_top, score_height, 0.0, 1.0))
+        for record in trace
+    ]
+    smoothed_points = [
+        (map_x(int(record["frame_index"])), map_y(float(record["smoothed_score"]), score_top, score_height, 0.0, 1.0))
+        for record in trace
+    ]
+    threshold_points = [
+        (map_x(int(record["frame_index"])), map_y(float(record["threshold"]), score_top, score_height, 0.0, 1.0))
+        for record in trace
+    ]
+    _draw_polyline(canvas, score_points, colors["score"], thickness=3)
+    _draw_polyline(canvas, smoothed_points, colors["smoothed"], thickness=2, dashed=True)
+    _draw_polyline(canvas, threshold_points, colors["threshold"], thickness=2, dashed=True)
+
+    for record in trace:
+        x = map_x(int(record["frame_index"]))
+        y = map_y(float(record["score"]), score_top, score_height, 0.0, 1.0)
+        cv2.circle(canvas, (x, y), 5, colors["visited"], -1, lineType=cv2.LINE_AA)
+
+    for index in selected_indices:
+        matching = next((record for record in trace if int(record["frame_index"]) == index), None)
+        if matching is None:
+            continue
+        x = map_x(index)
+        y = map_y(float(matching["score"]), score_top, score_height, 0.0, 1.0)
+        star_color = colors["force"] if index in force_selected else colors["selected"]
+        _draw_star(canvas, (x, y), 17, star_color, colors["text"])
+
+    legend_x = plot_left
+    legend_y = score_top - 12
+    legend_items = [
+        ("score", colors["score"], "line"),
+        ("smoothed", colors["smoothed"], "dash"),
+        ("threshold", colors["threshold"], "dash"),
+        ("visited", colors["visited"], "dot"),
+        ("selected", colors["selected"], "star"),
+    ]
+    for label, color, kind in legend_items:
+        if kind == "line":
+            cv2.line(canvas, (legend_x, legend_y - 6), (legend_x + 32, legend_y - 6), color, 3, lineType=cv2.LINE_AA)
+        elif kind == "dash":
+            _draw_polyline(canvas, [(legend_x, legend_y - 6), (legend_x + 32, legend_y - 6)], color, thickness=2, dashed=True)
+        elif kind == "dot":
+            cv2.circle(canvas, (legend_x + 14, legend_y - 6), 6, color, -1, lineType=cv2.LINE_AA)
+        else:
+            _draw_star(canvas, (legend_x + 15, legend_y - 6), 12, color, colors["text"])
+        put_text(label, (legend_x + 42, legend_y), 0.54, colors["axis"])
+        legend_x += 165
+
+    stride_top = score_top + score_height + panel_gap
+    s_max_param = params.get("s_max")
+    if stride_axis_max is not None:
+        stride_y_max = float(stride_axis_max)
+    elif s_max_param is not None:
+        stride_y_max = float(s_max_param)
+    else:
+        stride_y_max = max(float(record.get("stride", 1)) for record in trace)
+    stride_y_max = max(2.0, math.ceil(stride_y_max))
+    draw_axes(stride_top, stride_height, y_min=0.0, y_max=stride_y_max, y_label="Stride")
+    stride_points = [
+        (
+            map_x(int(record["frame_index"])),
+            map_y(float(record["stride"]), stride_top, stride_height, 0.0, stride_y_max),
+        )
+        for record in trace
+    ]
+    budget_points = [
+        (
+            map_x(int(record["frame_index"])),
+            map_y(
+                min(float(record["budget_stride"]), stride_y_max),
+                stride_top,
+                stride_height,
+                0.0,
+                stride_y_max,
+            ),
+        )
+        for record in trace
+    ]
+    _draw_polyline(canvas, stride_points, colors["stride"], thickness=3)
+    _draw_polyline(canvas, budget_points, colors["budget"], thickness=2, dashed=True)
+    put_text("stride", (plot_left, stride_top - 20), 0.54, colors["stride"])
+    put_text("budget stride clipped", (plot_left + 110, stride_top - 20), 0.54, colors["budget"])
+
+    if use_frames:
+        frames = _as_rgb_uint8_frames(frame_selection.frames)
+        thumb_top = stride_top + stride_height + frame_gap + 42
+        count = min(len(frames), len(selected_indices))
+        if count > 0:
+            available_width = plot_right - plot_left
+            gap = 10
+            thumb_width = max(70, (available_width - gap * (count - 1)) // count)
+            for idx in range(count):
+                frame = frames[idx]
+                h, w = frame.shape[:2]
+                scale = min(thumb_width / max(w, 1), thumb_height / max(h, 1))
+                resized_w = max(1, int(round(w * scale)))
+                resized_h = max(1, int(round(h * scale)))
+                resized = cv2.resize(frame, (resized_w, resized_h), interpolation=cv2.INTER_AREA)
+                x = plot_left + idx * (thumb_width + gap) + (thumb_width - resized_w) // 2
+                y = thumb_top + (thumb_height - resized_h) // 2
+                canvas[y : y + resized_h, x : x + resized_w] = resized
+                border_color = colors["budget"] if selected_indices[idx] in budget_filled else colors["selected"]
+                cv2.rectangle(
+                    canvas,
+                    (plot_left + idx * (thumb_width + gap), thumb_top),
+                    (plot_left + idx * (thumb_width + gap) + thumb_width, thumb_top + thumb_height),
+                    border_color,
+                    2,
+                    lineType=cv2.LINE_AA,
+                )
+                label = f"#{idx + 1}  frame {selected_indices[idx]}"
+                put_text(label, (plot_left + idx * (thumb_width + gap) + 6, thumb_top + thumb_height + 26), 0.5, colors["axis"])
+            put_text("Selected frames", (plot_left, thumb_top - 16), 0.62, colors["axis"], 2)
+
+    if output_path is not None:
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(str(output), cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR))
+
+    return canvas
+
+
 def _read_query(query: str, query_file: str | None) -> str:
     query_text = query.strip()
     if query_text:
