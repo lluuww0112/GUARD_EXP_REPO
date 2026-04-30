@@ -171,6 +171,101 @@ def _resize_frame(
     return resized_frame
 
 
+def _decode_target_frames(
+    cap: cv2.VideoCapture,
+    indices: list[int],
+    *,
+    max_side: int | None,
+    ensure_qwen_compatibility: bool,
+    qwen_factor: int,
+) -> tuple[list[np.ndarray], list[int]]:
+    frames: list[np.ndarray] = []
+    sampled_indices: list[int] = []
+
+    for frame_idx in indices:
+        seek_ok = cap.set(cv2.CAP_PROP_POS_FRAMES, int(frame_idx))
+        if not seek_ok:
+            continue
+        ok, frame_bgr = cap.read()
+        if not ok:
+            continue
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        frames.append(
+            _resize_frame(
+                frame_rgb,
+                max_side=max_side,
+                ensure_qwen_compatibility=ensure_qwen_compatibility,
+                qwen_factor=qwen_factor,
+            )
+        )
+        sampled_indices.append(int(frame_idx))
+
+    return frames, sampled_indices
+
+
+def _decode_target_frames_sequentially(
+    cap: cv2.VideoCapture,
+    indices: list[int],
+    *,
+    num_frames: int,
+    max_side: int | None,
+    ensure_qwen_compatibility: bool,
+    qwen_factor: int,
+) -> tuple[list[np.ndarray], list[int], int, bool, bool]:
+    target_set = set(indices)
+    frames: list[np.ndarray] = []
+    prefix_frames: list[np.ndarray] = []
+    sampled_indices: list[int] = []
+    frame_idx = 0
+
+    while True:
+        ok, frame_bgr = cap.read()
+        if not ok:
+            break
+
+        should_keep_prefix = frame_idx < num_frames
+        should_sample = frame_idx in target_set
+        if should_keep_prefix or should_sample:
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            frame_rgb = _resize_frame(
+                frame_rgb,
+                max_side=max_side,
+                ensure_qwen_compatibility=ensure_qwen_compatibility,
+                qwen_factor=qwen_factor,
+            )
+            if should_keep_prefix:
+                # Keep the prefix so we can fall back to "all decoded frames"
+                # when the actual video is shorter than the requested sample count.
+                prefix_frames.append(frame_rgb)
+            if should_sample:
+                frames.append(frame_rgb)
+                sampled_indices.append(frame_idx)
+
+        frame_idx += 1
+
+    actual_total_frames = frame_idx
+    used_short_video_fallback = False
+    used_index_mismatch_fallback = False
+    if len(frames) != len(indices):
+        recoverable_frame_count = min(actual_total_frames, num_frames)
+        if recoverable_frame_count <= 0 or len(prefix_frames) != recoverable_frame_count:
+            raise RuntimeError(
+                f"Expected {len(indices)} sampled frames, but got {len(frames)}."
+            )
+        frames = prefix_frames
+        sampled_indices = list(range(recoverable_frame_count))
+        used_short_video_fallback = actual_total_frames < num_frames
+        used_index_mismatch_fallback = not used_short_video_fallback
+
+    return (
+        frames,
+        sampled_indices,
+        actual_total_frames,
+        used_short_video_fallback,
+        used_index_mismatch_fallback,
+    )
+
+
 def uniform_sampling(
     video_path: str,
     num_frames: int = 8,
@@ -191,56 +286,46 @@ def uniform_sampling(
     else:
         indices = np.linspace(0, total_frames - 1, num_frames).round().astype(int).tolist()
 
-    target_set = set(indices)
-    frames: list[np.ndarray] = []
-    prefix_frames: list[np.ndarray] = []
-    sampled_indices: list[int] = []
-    frame_idx = 0
-
     try:
-        while True:
-            ok, frame_bgr = cap.read()
-            if not ok:
-                break
-
-            should_keep_prefix = frame_idx < num_frames
-            should_sample = frame_idx in target_set
-            if should_keep_prefix or should_sample:
-                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-                frame_rgb = _resize_frame(
-                    frame_rgb,
-                    max_side=max_side,
-                    ensure_qwen_compatibility=ensure_qwen_compatibility,
-                    qwen_factor=qwen_factor,
+        frames, sampled_indices = _decode_target_frames(
+            cap,
+            indices,
+            max_side=max_side,
+            ensure_qwen_compatibility=ensure_qwen_compatibility,
+            qwen_factor=qwen_factor,
+        )
+        actual_total_frames = total_frames
+        used_short_video_fallback = False
+        used_index_mismatch_fallback = False
+        sampling_strategy = "indexed_seek"
+        if len(frames) != len(indices):
+            cap.release()
+            fallback_video_path = str(transcoded_path) if transcoded_path is not None else video_path
+            cap, total_frames, fps = _inspect_video_capture(fallback_video_path)
+            if not cap.isOpened() or total_frames <= 0:
+                raise RuntimeError(
+                    "Failed to reopen video for sequential fallback. "
+                    f"source={video_path}"
                 )
-                if should_keep_prefix:
-                    # Keep the prefix so we can fall back to "all decoded frames"
-                    # when the actual video is shorter than the requested sample count.
-                    prefix_frames.append(frame_rgb)
-                if should_sample:
-                    frames.append(frame_rgb)
-                    sampled_indices.append(frame_idx)
-
-            frame_idx += 1
+            (
+                frames,
+                sampled_indices,
+                actual_total_frames,
+                used_short_video_fallback,
+                used_index_mismatch_fallback,
+            ) = _decode_target_frames_sequentially(
+                cap,
+                indices,
+                num_frames=num_frames,
+                max_side=max_side,
+                ensure_qwen_compatibility=ensure_qwen_compatibility,
+                qwen_factor=qwen_factor,
+            )
+            sampling_strategy = "sequential_fallback"
     finally:
         cap.release()
         if transcoded_path is not None:
             shutil.rmtree(transcoded_path.parent, ignore_errors=True)
-
-    actual_total_frames = frame_idx
-    used_short_video_fallback = False
-    used_index_mismatch_fallback = False
-    if len(frames) != len(indices):
-        recoverable_frame_count = min(actual_total_frames, num_frames)
-        if recoverable_frame_count <= 0 or len(prefix_frames) != recoverable_frame_count:
-            raise RuntimeError(
-                f"Expected {len(indices)} sampled frames, but got {len(frames)}."
-            )
-        frames = prefix_frames
-        sampled_indices = list(range(recoverable_frame_count))
-        indices = sampled_indices.copy()
-        used_short_video_fallback = actual_total_frames < num_frames
-        used_index_mismatch_fallback = not used_short_video_fallback
 
     base_height, base_width = frames[0].shape[:2]
     normalized_frames = []
@@ -263,6 +348,7 @@ def uniform_sampling(
         "decoded_total_frames": actual_total_frames,
         "fps": fps if fps > 0 else None,
         "frame_shape": list(video_np.shape[1:]),
+        "sampling_strategy": sampling_strategy,
         "ensure_qwen_compatibility": ensure_qwen_compatibility,
         "qwen_factor": qwen_factor if ensure_qwen_compatibility else None,
         "used_short_video_fallback": used_short_video_fallback,

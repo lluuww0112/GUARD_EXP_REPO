@@ -10,11 +10,23 @@ hydra:
     dir: .
 
 frame_selection:
-  _target_: model.base.uniform_sampling
+  _target_: model.FrameSelection.DPC.dpc_sampling
   _partial_: true
-  num_frames: 10
+  query_file: ${invoke.query_file}
+  threshold: 10 # 반복적 클러스터링 종료 조건 (고연관성 프레임 갯수)
+  tau: 0.2 # 고연관성 프레임 판단 조건 ( cos 유사도 결정값 )
+  k_set: [10, 15, 20] # 반복적 클러스터링시 사용할 군집수
+  dpc_pool_size: 512 # 초반 균등 샘플링용 프레임 수
+  kneighbor_count: 5 # density 계산을 위해 사용하는 이웃 수
+  clip_model_name: "openai/clip-vit-large-patch14"
+  clip_dtype: "bf16"
+  aggregation: "max"
+  cache_dense_scores: true
+  batch_size: 512
   max_side: 720
   ensure_qwen_compatibility: true
+  qwen_factor: 28
+  device: null
 
 patch_selection_v1:
   _target_: model.PatchSelection.DenseDPS.selection_v1.maskclip_patch_selection
@@ -24,98 +36,91 @@ patch_selection_v1:
   clip_dtype: "bf16"
   clip_do_center_crop: false # false면 CLIP dense score를 full-frame 기준으로 계산
   keep_ratio: 0.3
-  selection_mode: "naive_mean" # Enum["naive_mean" | "sliding_window"], naive_mean -> 단순 평균 산출, sliding_window -> 경계 정보 보전하며 윈도우 슬라이딩으로 패치 스코어 산출
+  selection_mode: "naive_mean" # Enum["naive_mean" | "sliding_window"]
   window_size: 4
-  window_stride: 2 
-  aggregation: "max" # 다중 쿼리 집계 방식, Enum["max" | "mean"]
-  batch_size: ${frame_selection.num_frames}
-  spatial_merge_size: null # qwen-vl의 merge 사이즈를 명시적으로 맞추는 옵션, null로 하면 기본 크기인 2로 설정
+  window_stride: 2
+  aggregation: "max"
+  batch_size: ${frame_selection.threshold}
+  spatial_merge_size: null
   device: null
 
-
-patch_selection_v2: # 프레임 중요도에 따른 budget 분배
+patch_selection_v2:
   _target_: model.PatchSelection.DenseDPS.selection_v2.maskclip_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
   clip_model_name: "openai/clip-vit-large-patch14"
   clip_dtype: "bf16"
   clip_do_center_crop: false # false면 CLIP dense score를 full-frame 기준으로 계산
-  total_budget: null # null이면 keep_ratio * 전체 merged token 수로 총 예산 산출
+  total_budget: null
   keep_ratio: 0.3
-  temperature: 0.4 # 작을수록 high-score frame에 budget 집중, 상위 프레임만 강하게 주려면 0.1~0.2정도
+  temperature: 0.4
   selection_mode: "naive_mean"
   window_size: 4
   window_stride: 2
-  aggregation: "max" # dense patch score와 frame importance score 모두에 적용
-  batch_size: ${frame_selection.num_frames}
+  aggregation: "max"
+  batch_size: ${frame_selection.threshold}
   spatial_merge_size: null
   device: null
 
-
-patch_selection_v3: # threshold 기반 eligible patch만 남기고 leftover budget 재분배
+patch_selection_v3:
   _target_: model.PatchSelection.DenseDPS.selection_v3.maskclip_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
   clip_model_name: "openai/clip-vit-large-patch14"
   clip_dtype: "bf16"
   clip_do_center_crop: false # false면 CLIP dense score를 full-frame 기준으로 계산
-  total_budget: null # null이면 keep_ratio * 전체 merged token 수로 총 예산 산출
+  total_budget: null
   keep_ratio: 0.3
-  temperature: 0.4 # 작을수록 high-score frame에 budget 집중, 상위 프레임만 강하게 주려면 0.1 ~ 0.2정도
-  patch_score_threshold: 0.01 # raw cosine threshold, null 불가, 예: 0.0 / 0.1 / 0.2
+  temperature: 0.4
+  patch_score_threshold: 0.01
   selection_mode: "naive_mean"
   window_size: 4
   window_stride: 2
-  aggregation: "max" # dense patch score와 frame importance score 모두에 적용
-  batch_size: ${frame_selection.num_frames}
+  aggregation: "max"
+  batch_size: ${frame_selection.threshold}
   spatial_merge_size: null
   device: null
 
-
-patch_selection_v4: # threshold를 먼저 capacity로 반영한 one-pass budget allocation
+patch_selection_v4:
   _target_: model.PatchSelection.DenseDPS.selection_v4.maskclip_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
   clip_model_name: "openai/clip-vit-large-patch14"
   clip_dtype: "bf16"
   clip_do_center_crop: false # false면 CLIP dense score를 full-frame 기준으로 계산
-  total_budget: null # null이면 keep_ratio * 전체 merged token 수로 총 예산 산출
+  total_budget: null
   keep_ratio: 0.3
-  temperature: 0.4 # 작을수록 high-score frame에 budget 집중
-  patch_score_threshold: 0.02 # raw cosine threshold, null 불가, 예: 0.0 / 0.1 / 0.2
+  temperature: 0.4
+  patch_score_threshold: 0.02
   selection_mode: "naive_mean"
   window_size: 4
   window_stride: 2
-  aggregation: "max" # dense patch score와 frame importance score 모두에 적용
-  batch_size: ${frame_selection.num_frames}
+  aggregation: "max"
+  batch_size: ${frame_selection.threshold}
   spatial_merge_size: null
   device: null
 
-
-patch_selection_v5: # v4 + query embedding Gaussian noise
-  _target_: model.PatchSelection.DenseDPS.selection_v5.maskclip_patch_selection
+patch_selection_dpc_ddps:
+  _target_: model.FrameSelection.DPC.dpc_ddps_patch_selection
   _partial_: true
   query_file: ${invoke.query_file}
   clip_model_name: "openai/clip-vit-large-patch14"
   clip_dtype: "bf16"
-  clip_do_center_crop: false # false면 CLIP dense score를 full-frame 기준으로 계산
-  total_budget: null # null이면 keep_ratio * 전체 merged token 수로 총 예산 산출
+  clip_do_center_crop: false # DPC에서 캐시한 CLIP dense score를 우선 사용
+  total_budget: null
   keep_ratio: 0.3
-  temperature: 0.4 # 작을수록 high-score frame에 budget 집중
-  patch_score_threshold: 0.02 # raw cosine threshold, null 불가, 예: 0.0 / 0.1 / 0.2
-  query_noise_scale: 1e-4 # query embedding에 더할 Gaussian noise variance. 0.0이면 비활성
-  query_noise_seed: null # 재현이 필요하면 정수 seed 지정
+  temperature: 0.4
+  patch_score_threshold: 0.02
   selection_mode: "naive_mean"
   window_size: 4
   window_stride: 2
-  aggregation: "max" # dense patch score와 frame importance score 모두에 적용
-  batch_size: ${frame_selection.num_frames}
+  aggregation: "max"
+  batch_size: ${frame_selection.threshold}
   spatial_merge_size: null
   device: null
 
-
 vlm:
-  _target_: model.base.BaseVLM
+  _target_: model.FrameSelection.DPC.DPCVLM
   model_id: "Qwen/Qwen3-VL-8B-Instruct"
   backend: "qwen3_vl"
   dtype: "bf16"
@@ -131,15 +136,14 @@ vlm:
       llm_int8_threshold: 6.0
       llm_int8_enable_fp32_cpu_offload: false
   frame_selector: ${frame_selection}
-  patch_selector: ${patch_selection_v5}
-  duplicate_factor: 2 # 1이면 프레임 복사 비활성
+  patch_selector: ${patch_selection_dpc_ddps}
+  duplicate_factor: 1 # DPC_DDPS는 patch selection 입력 프레임 수를 threshold로 유지
   duplicate_for_qwen_only: true
   processor_kwargs: {}
   model_kwargs: {}
   local_model_dir: "./model/repo"
   generation_kwargs:
     do_sample: false
-    # top_p: 0.8
     max_new_tokens: 128
 
 invoke:
