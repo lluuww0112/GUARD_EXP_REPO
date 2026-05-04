@@ -38,7 +38,7 @@ vlm:
       llm_int8_enable_fp32_cpu_offload: false # 8bit 모드에서 CPU fp32 오프로딩 사용 여부
   frame_selector: ${frame_selection}
   patch_selector: ${patch_selection}
-  duplicate_factor: 2 # 1이면 프레임 복사 비활성, 2면 동일 프레임이 두 장씩 들어감
+  duplicate_factor: 1 # 1이면 프레임 복사 비활성, 2면 동일 프레임이 두 장씩 들어감
   duplicate_for_qwen_only: true
   processor_kwargs: {} # 전처리기 로드시 .from_pretrained() 옵션 설정
   model_kwargs: {} # 모델 로드시 .from_pretrained() 옵션 설정
