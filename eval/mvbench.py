@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import shutil
 import subprocess
@@ -35,6 +36,8 @@ from eval.runtime_metrics import (
 VIDEO_DIR_CANDIDATES = ("data", "videos", "video")
 ANNOTATION_DIR_CANDIDATES = ("json", "annotations")
 VIDEO_SUFFIXES = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+TRAILING_TIME_RANGE_PATTERN = re.compile(r"_(?:\d+(?:\.\d+)?)_(?:\d+(?:\.\d+)?)$")
 INDEX_PATTERN = re.compile(r"\b(?:answer|option|choice)?\s*[:#\-]?\s*([0-9])\b", re.IGNORECASE)
 LETTER_PATTERN = re.compile(r"\b(?:answer|option|choice)?\s*[:#\-]?\s*([A-E])\b", re.IGNORECASE)
 
@@ -212,17 +215,93 @@ def _collect_annotation_files(annotations_dir: Path, task_names: list[str] | Non
     return selected
 
 
+def _lookup_key_variants(path: Path, search_root: Path) -> set[str]:
+    keys = {path.name.casefold()}
+    if path.is_file():
+        keys.add(path.stem.casefold())
+        stripped_time_range = TRAILING_TIME_RANGE_PATTERN.sub("", path.stem)
+        if stripped_time_range != path.stem:
+            keys.add(stripped_time_range.casefold())
+
+    try:
+        relative_path = path.relative_to(search_root)
+    except ValueError:
+        relative_path = path
+    relative_key = relative_path.as_posix()
+    keys.add(relative_key.casefold())
+    if path.is_file():
+        relative_stem_key = relative_path.with_suffix("").as_posix()
+        keys.add(relative_stem_key.casefold())
+        stripped_relative_stem = TRAILING_TIME_RANGE_PATTERN.sub("", relative_stem_key)
+        if stripped_relative_stem != relative_stem_key:
+            keys.add(stripped_relative_stem.casefold())
+    return {key for key in keys if key}
+
+
+def _add_lookup_path(lookup: dict[str, list[Path]], key: str, path: Path) -> None:
+    paths = lookup.setdefault(key, [])
+    resolved = path.resolve()
+    if resolved not in paths:
+        paths.append(resolved)
+
+
+def _collect_video_search_roots(data_dir: Path) -> list[Path]:
+    candidates = [
+        data_dir,
+        data_dir.parent / "video",
+        data_dir.parent / "videos",
+    ]
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if not candidate.exists() or not candidate.is_dir():
+            continue
+        resolved = candidate.resolve()
+        if resolved in seen:
+            continue
+        roots.append(resolved)
+        seen.add(resolved)
+    return roots
+
+
 def _build_video_lookup(data_dir: Path) -> tuple[dict[str, list[Path]], set[str]]:
     lookup: dict[str, list[Path]] = {}
-    for path in data_dir.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in VIDEO_SUFFIXES:
-            continue
-        lookup.setdefault(path.name.casefold(), []).append(path.resolve())
-        lookup.setdefault(path.stem.casefold(), []).append(path.resolve())
+    frame_dirs: set[Path] = set()
+    search_roots = _collect_video_search_roots(data_dir)
+    for search_root in search_roots:
+        for path in search_root.rglob("*"):
+            if not path.is_file():
+                continue
+            suffix = path.suffix.lower()
+            if suffix in VIDEO_SUFFIXES:
+                for key in _lookup_key_variants(path, search_root):
+                    _add_lookup_path(lookup, key, path)
+                continue
+            if suffix in IMAGE_SUFFIXES:
+                frame_dirs.add(path.parent)
+
+        for frame_dir in frame_dirs:
+            try:
+                frame_dir.relative_to(search_root)
+            except ValueError:
+                continue
+            for key in _lookup_key_variants(frame_dir, search_root):
+                _add_lookup_path(lookup, key, frame_dir)
+
     if not lookup:
-        raise FileNotFoundError(f"No supported video files were found under: {data_dir}")
+        raise FileNotFoundError(
+            "No supported video files or frame directories were found under: "
+            f"{[str(root) for root in search_roots] or [str(data_dir)]}"
+        )
     duplicates = {key for key, paths in lookup.items() if len(paths) > 1}
     return lookup, duplicates
+
+
+def _format_candidate_paths(candidates: list[Path], *, limit: int = 5) -> str:
+    rendered = [str(path) for path in candidates[:limit]]
+    if len(candidates) > limit:
+        rendered.append(f"... and {len(candidates) - limit} more")
+    return ", ".join(rendered)
 
 
 def _resolve_video_path(
@@ -237,6 +316,11 @@ def _resolve_video_path(
     if not candidates:
         raise FileNotFoundError(f"Could not find MVBench video file for `{video_name}`.")
     candidates = sorted(candidates, key=lambda path: (len(path.parts), str(path).casefold()))
+    if len(candidates) > 1:
+        raise FileNotFoundError(
+            "MVBench video lookup is ambiguous. "
+            f"task={task_name}, video={video_name}, candidates={_format_candidate_paths(candidates)}"
+        )
     return candidates[0]
 
 
@@ -253,9 +337,11 @@ def _load_samples(
     annotation_files: list[Path],
     video_lookup: dict[str, list[Path]],
     duplicate_keys: set[str],
-) -> tuple[list[MVBenchSample], int]:
+    skip_missing_videos: bool = False,
+) -> tuple[list[MVBenchSample], int, int]:
     samples: list[MVBenchSample] = []
     skipped = 0
+    missing = 0
     for annotation_file in annotation_files:
         payload = json.loads(annotation_file.read_text(encoding="utf-8"))
         if not isinstance(payload, list):
@@ -277,6 +363,17 @@ def _load_samples(
                 skipped += 1
                 continue
             candidates_text = [str(candidate).strip() for candidate in candidates]
+            try:
+                video_path = _resolve_video_path(
+                    video_name,
+                    video_lookup,
+                    task_name=task_name,
+                )
+            except FileNotFoundError:
+                if skip_missing_videos:
+                    missing += 1
+                    continue
+                raise
             samples.append(
                 MVBenchSample(
                     task_name=task_name,
@@ -288,15 +385,11 @@ def _load_samples(
                     answer_index=_extract_answer_index(answer_text, candidates_text),
                     start=_resolve_optional_float(item.get("start")),
                     end=_resolve_optional_float(item.get("end")),
-                    video_path=_resolve_video_path(
-                        video_name,
-                        video_lookup,
-                        task_name=task_name,
-                    ),
+                    video_path=video_path,
                     raw_item=dict(item),
                 )
             )
-    return samples, skipped
+    return samples, skipped, missing
 
 
 def _build_option_block(candidates: list[str]) -> str:
@@ -398,7 +491,71 @@ def _write_jsonl(output_path: Path, rows: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def _natural_path_key(path: Path) -> list[int | str]:
+    parts = re.split(r"(\d+)", path.name.casefold())
+    return [int(part) if part.isdigit() else part for part in parts]
+
+
+def _collect_frame_files(frame_dir: Path) -> list[Path]:
+    return sorted(
+        (path for path in frame_dir.iterdir() if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES),
+        key=_natural_path_key,
+    )
+
+
+def _infer_frame_directory_fps(frame_dir: Path) -> float:
+    for part in frame_dir.parts:
+        match = re.search(r"fps([0-9]+(?:\.[0-9]+)?)", part.casefold())
+        if match:
+            fps = float(match.group(1))
+            if fps > 0:
+                return fps
+    return 3.0
+
+
+def _materialize_frame_directory(frame_dir: Path, temp_dir: Path) -> Path:
+    frame_files = _collect_frame_files(frame_dir)
+    if not frame_files:
+        raise FileNotFoundError(f"No image frames were found under MVBench frame directory: {frame_dir}")
+
+    path_hash = hashlib.sha1(str(frame_dir.resolve()).encode("utf-8")).hexdigest()[:10]
+    output_path = temp_dir / f"{frame_dir.name}_{path_hash}.mp4"
+    if output_path.exists():
+        return output_path
+
+    first_frame = cv2.imread(str(frame_files[0]), cv2.IMREAD_COLOR)
+    if first_frame is None:
+        raise RuntimeError(f"Failed to read MVBench frame: {frame_files[0]}")
+
+    height, width = first_frame.shape[:2]
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, _infer_frame_directory_fps(frame_dir), (width, height))
+    if not writer.isOpened():
+        raise RuntimeError(f"Failed to create MVBench frame-directory video writer: {output_path}")
+    try:
+        writer.write(first_frame)
+        for frame_file in frame_files[1:]:
+            frame = cv2.imread(str(frame_file), cv2.IMREAD_COLOR)
+            if frame is None:
+                raise RuntimeError(f"Failed to read MVBench frame: {frame_file}")
+            if frame.shape[:2] != (height, width):
+                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+            writer.write(frame)
+    finally:
+        writer.release()
+
+    if not output_path.exists() or output_path.stat().st_size <= 0:
+        raise RuntimeError(f"Failed to create MVBench video from frame directory: {frame_dir}")
+    return output_path
+
+
 def _extract_video_clip(video_path: Path, start: float | None, end: float | None, temp_dir: Path) -> Path:
+    if video_path.is_dir():
+        materialized_video_path = _materialize_frame_directory(video_path, temp_dir)
+        if start is None and end is None:
+            return materialized_video_path
+        return _extract_video_clip(materialized_video_path, start, end, temp_dir)
+
     if start is None and end is None:
         return video_path
 
@@ -532,10 +689,12 @@ def main(config: DictConfig) -> None:
     task_names = list(eval_config.get("tasks") or [])
     annotation_files = _collect_annotation_files(annotations_dir, task_names if task_names else None)
     video_lookup, duplicate_keys = _build_video_lookup(data_dir)
-    samples, skipped = _load_samples(
+    skip_missing_videos = bool(eval_config.get("skip_missing_videos", False))
+    samples, skipped, missing = _load_samples(
         annotation_files=annotation_files,
         video_lookup=video_lookup,
         duplicate_keys=duplicate_keys,
+        skip_missing_videos=skip_missing_videos,
     )
 
     start_index = _resolve_optional_int(eval_config.get("start_index")) or 0
@@ -572,6 +731,7 @@ def main(config: DictConfig) -> None:
     print(f"Tasks        : {len(annotation_files)}")
     print(f"Samples      : {len(samples)}")
     print(f"Skipped      : {skipped} (duplicate video names)")
+    print(f"Missing Skip : {missing} (missing video paths, enabled={skip_missing_videos})")
     print()
 
     if invoke_config.get("print_config", False):

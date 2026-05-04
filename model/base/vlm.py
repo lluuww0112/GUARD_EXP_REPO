@@ -1246,6 +1246,7 @@ class BaseVLM(VLMInterface):
         }
         return generation_inputs, metadata
 
+    @torch.inference_mode()
     def _run_patch_selection_generation(
         self,
         *,
@@ -1275,11 +1276,10 @@ class BaseVLM(VLMInterface):
         )
 
         generate_start = time.perf_counter()
-        with torch.inference_mode():
-            output_ids = self.model.generate(
-                **generation_inputs,
-                **self.generation_kwargs,
-            )
+        output_ids = self.model.generate(
+            **generation_inputs,
+            **self.generation_kwargs,
+        )
         generate_elapsed = time.perf_counter() - generate_start
 
         prompt_length = generation_inputs["input_ids"].shape[1]

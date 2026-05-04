@@ -54,3 +54,4 @@ mvbench:
   output_file: "./eval/result/mvbench_eval.jsonl"
   start_index: 0
   limit: null
+  skip_missing_videos: false # true면 annotation에는 있지만 실제 파일/프레임 디렉토리가 없는 샘플을 건너뜀

@@ -131,7 +131,7 @@ vlm:
       llm_int8_threshold: 6.0
       llm_int8_enable_fp32_cpu_offload: false
   frame_selector: ${frame_selection}
-  patch_selector: ${patch_selection_v5}
+  patch_selector: ${patch_selection_v4}
   duplicate_factor: 2 # 1이면 프레임 복사 비활성
   duplicate_for_qwen_only: true
   processor_kwargs: {}

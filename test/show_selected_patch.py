@@ -353,7 +353,7 @@ def _load_dataset_target(
         task_names = [args.task_name] if args.task_name else list(eval_config.get("task_names") or [])
         annotation_files = mvbench._collect_annotation_files(annotations_dir, task_names or None)
         video_lookup, duplicate_keys = mvbench._build_video_lookup(data_dir)
-        samples, _ = mvbench._load_samples(
+        samples, _, _ = mvbench._load_samples(
             annotation_files=annotation_files,
             video_lookup=video_lookup,
             duplicate_keys=duplicate_keys,
