@@ -358,15 +358,3 @@ def uniform_sampling(
         frames=torch.from_numpy(video_np),
         metadata=metadata,
     )
-
-
-def identity_patch_selection(
-    video_features: torch.Tensor,
-    **_: Any,
-) -> PatchSelectionResult:
-    selected_indices = torch.arange(
-        video_features.shape[0],
-        device=video_features.device,
-        dtype=torch.long,
-    )
-    return PatchSelectionResult(selected_indices=selected_indices)

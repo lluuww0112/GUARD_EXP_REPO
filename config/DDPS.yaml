@@ -137,13 +137,15 @@ vlm:
   processor_kwargs: {}
   model_kwargs: {}
   local_model_dir: "./model/repo"
+  profile_flops: false
+  profile_flops_top_ops: 5
   generation_kwargs:
     do_sample: false
     # top_p: 0.8
     max_new_tokens: 128
 
 invoke:
-  video_path: "./data/Mcst74e8S9U.mp4"
+  video_path: "./data/ydcPPppK7Dg.mp4"
   prompt_file: "model/base/prompt.txt"
   query_file: "model/base/query.txt"
   print_config: false

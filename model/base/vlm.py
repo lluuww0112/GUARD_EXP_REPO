@@ -25,6 +25,8 @@ from transformers import (
     Qwen2VLProcessor,
     Qwen2_5_VLForConditionalGeneration,
     Qwen3VLForConditionalGeneration,
+    StoppingCriteria,
+    StoppingCriteriaList,
 )
 
 from .selection import FrameSelectionResult, PatchSelectionResult
@@ -100,6 +102,22 @@ VLM_BACKENDS = {
 }
 
 
+class _FirstTokenTimerStoppingCriteria(StoppingCriteria):
+    def __init__(self, start_time: float):
+        self.start_time = float(start_time)
+        self.first_token_seconds: float | None = None
+
+    def __call__(
+        self,
+        input_ids: torch.LongTensor,
+        scores: torch.FloatTensor,
+        **kwargs: Any,
+    ) -> bool:
+        if self.first_token_seconds is None:
+            self.first_token_seconds = time.perf_counter() - self.start_time
+        return False
+
+
 class VLMInterface(ABC):
     @abstractmethod
     def build_vlm(
@@ -133,6 +151,8 @@ class BaseVLM(VLMInterface):
         dtype: str | torch.dtype | None = None,
         quantization: dict[str, Any] | None = None,
         local_model_dir: str | None = None,
+        profile_flops: bool = False,
+        profile_flops_top_ops: int = 5,
         **frame_selector_kwargs: Any,
     ):
         if backend not in VLM_BACKENDS:
@@ -164,6 +184,8 @@ class BaseVLM(VLMInterface):
             if local_model_dir is not None
             else None
         )
+        self.profile_flops = bool(profile_flops)
+        self.profile_flops_top_ops = max(int(profile_flops_top_ops), 0)
         self.resolved_model_source = model_id
         self.last_patch_selection_info: dict[str, Any] = {
             "applied": False,
@@ -877,17 +899,197 @@ class BaseVLM(VLMInterface):
         prepared_inputs["video_grid_thw"] = expanded_video_grid_thw
         return prepared_inputs
 
+    def _summarize_flop_profile(
+        self,
+        profiler: torch.profiler.profile,
+    ) -> dict[str, Any]:
+        events = profiler.key_averages()
+        event_summaries: list[dict[str, Any]] = []
+        total_flops = 0.0
+        flop_op_count = 0
+
+        for event in events:
+            flops = float(getattr(event, "flops", 0) or 0)
+            total_flops += flops
+            if flops <= 0:
+                continue
+            flop_op_count += 1
+            if self.profile_flops_top_ops > 0:
+                event_summaries.append(
+                    {
+                        "name": str(getattr(event, "key", "")),
+                        "flops": flops,
+                        "gflops": flops / 1e9,
+                        "calls": int(getattr(event, "count", 0) or 0),
+                    }
+                )
+
+        metrics: dict[str, Any] = {
+            "llm_generate_flops_profiled": True,
+            "llm_generate_flops": total_flops,
+            "llm_generate_gflops": total_flops / 1e9,
+            "llm_generate_profiled_ops": len(events),
+            "llm_generate_profiled_flop_ops": flop_op_count,
+        }
+        if self.profile_flops_top_ops > 0:
+            metrics["llm_generate_top_flop_ops"] = sorted(
+                event_summaries,
+                key=lambda item: float(item["flops"]),
+                reverse=True,
+            )[: self.profile_flops_top_ops]
+        return metrics
+
+    def _resolve_generation_cuda_device(
+        self,
+        generation_inputs: Mapping[str, Any],
+    ) -> torch.device | None:
+        if not torch.cuda.is_available():
+            return None
+
+        for value in generation_inputs.values():
+            if isinstance(value, torch.Tensor) and value.is_cuda:
+                return value.device
+
+        model_device = getattr(self.model, "device", None)
+        if isinstance(model_device, torch.device) and model_device.type == "cuda":
+            return model_device
+
+        return torch.device("cuda", torch.cuda.current_device())
+
+    def _cuda_memory_metrics(self, device: torch.device | None) -> dict[str, Any]:
+        if device is None:
+            return {}
+
+        try:
+            properties = torch.cuda.get_device_properties(device)
+            return {
+                "gpu_device": torch.cuda.get_device_name(device),
+                "gpu_total_memory_bytes": int(properties.total_memory),
+                "gpu_memory_allocated_bytes": int(torch.cuda.memory_allocated(device)),
+                "gpu_memory_reserved_bytes": int(torch.cuda.memory_reserved(device)),
+                "gpu_peak_memory_allocated_bytes": int(torch.cuda.max_memory_allocated(device)),
+                "gpu_peak_memory_reserved_bytes": int(torch.cuda.max_memory_reserved(device)),
+            }
+        except Exception as exc:
+            return {"gpu_memory_error": str(exc)}
+
+    def _reset_cuda_peak_memory_stats(self, device: torch.device | None) -> None:
+        if device is None:
+            return
+        try:
+            torch.cuda.reset_peak_memory_stats(device)
+        except Exception:
+            pass
+
+    def _build_generation_kwargs_with_prefill_timer(
+        self,
+        timer: _FirstTokenTimerStoppingCriteria,
+    ) -> dict[str, Any]:
+        generation_kwargs = dict(self.generation_kwargs)
+        existing_criteria = generation_kwargs.get("stopping_criteria")
+        if existing_criteria is None:
+            criteria = StoppingCriteriaList([timer])
+        elif isinstance(existing_criteria, StoppingCriteriaList):
+            criteria = StoppingCriteriaList([*existing_criteria, timer])
+        elif isinstance(existing_criteria, Sequence):
+            criteria = StoppingCriteriaList([*existing_criteria, timer])
+        else:
+            criteria = StoppingCriteriaList([existing_criteria, timer])
+        generation_kwargs["stopping_criteria"] = criteria
+        return generation_kwargs
+
+    def _generate_once(
+        self,
+        generation_inputs: dict[str, Any],
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        cuda_device = self._resolve_generation_cuda_device(generation_inputs)
+        if cuda_device is not None:
+            torch.cuda.synchronize(cuda_device)
+        self._reset_cuda_peak_memory_stats(cuda_device)
+
+        generate_start = time.perf_counter()
+        first_token_timer = _FirstTokenTimerStoppingCriteria(generate_start)
+        generation_kwargs = self._build_generation_kwargs_with_prefill_timer(first_token_timer)
+        with torch.inference_mode():
+            output_ids = self.model.generate(
+                **generation_inputs,
+                **generation_kwargs,
+            )
+        if cuda_device is not None:
+            torch.cuda.synchronize(cuda_device)
+
+        metrics = {
+            "llm_prefill_seconds": first_token_timer.first_token_seconds,
+            **self._cuda_memory_metrics(cuda_device),
+        }
+        return output_ids, metrics
+
+    def _generate_with_optional_flop_profile(
+        self,
+        generation_inputs: dict[str, Any],
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        if not self.profile_flops:
+            output_ids, runtime_metrics = self._generate_once(generation_inputs)
+            return output_ids, {
+                "llm_generate_flops_profiled": False,
+                **runtime_metrics,
+            }
+
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        if torch.cuda.is_available():
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            with torch.profiler.profile(
+                activities=activities,
+                record_shapes=False,
+                with_flops=True,
+                acc_events=True,
+            ) as profiler:
+                output_ids, runtime_metrics = self._generate_once(generation_inputs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except Exception as exc:
+            warnings.warn(
+                "FLOPs profiling failed; retrying generation without profiler. "
+                f"reason={exc}",
+                stacklevel=2,
+            )
+            output_ids, runtime_metrics = self._generate_once(generation_inputs)
+            return output_ids, {
+                "llm_generate_flops_profiled": False,
+                "llm_generate_flops_error": str(exc),
+                **runtime_metrics,
+            }
+
+        try:
+            return output_ids, {
+                **self._summarize_flop_profile(profiler),
+                **runtime_metrics,
+            }
+        except Exception as exc:
+            warnings.warn(
+                "FLOPs profile summarization failed; keeping generation output. "
+                f"reason={exc}",
+                stacklevel=2,
+            )
+            return output_ids, {
+                "llm_generate_flops_profiled": False,
+                "llm_generate_flops_error": str(exc),
+                **runtime_metrics,
+            }
+
     def _run_standard_generation(
         self,
         model_inputs: dict[str, Any],
     ) -> str:
         generation_model_inputs = self._prepare_generation_model_inputs(model_inputs)
         generate_start = time.perf_counter()
-        with torch.inference_mode():
-            output_ids = self.model.generate(
-                **generation_model_inputs,
-                **self.generation_kwargs,
-            )
+        output_ids, flop_metrics = self._generate_with_optional_flop_profile(
+            generation_model_inputs
+        )
         generate_elapsed = time.perf_counter() - generate_start
 
         input_ids = generation_model_inputs.get("input_ids")
@@ -898,8 +1100,11 @@ class BaseVLM(VLMInterface):
         )
         self.last_timing_info = {
             "path": "standard_generation",
+            "latency_seconds": generate_elapsed,
             "llm_generate_seconds": generate_elapsed,
             "generated_tokens": generated_tokens,
+            "input_sequence_length": int(prompt_length),
+            **flop_metrics,
         }
         return self._decode_generation_output(output_ids, prompt_length=prompt_length)
 
@@ -1254,6 +1459,7 @@ class BaseVLM(VLMInterface):
         frame_selection: FrameSelectionResult,
         model_inputs: dict[str, Any],
     ) -> str:
+        latency_start = time.perf_counter()
         full_video_features, extraction_metadata = self._extract_video_features(model_inputs)
         selection_output = self._call_patch_selector(
             video_features=full_video_features,
@@ -1276,11 +1482,11 @@ class BaseVLM(VLMInterface):
         )
 
         generate_start = time.perf_counter()
-        output_ids = self.model.generate(
-            **generation_inputs,
-            **self.generation_kwargs,
+        output_ids, flop_metrics = self._generate_with_optional_flop_profile(
+            generation_inputs
         )
         generate_elapsed = time.perf_counter() - generate_start
+        latency_elapsed = time.perf_counter() - latency_start
 
         prompt_length = generation_inputs["input_ids"].shape[1]
         generated_tokens = self._count_generated_tokens(
@@ -1297,8 +1503,11 @@ class BaseVLM(VLMInterface):
         }
         self.last_timing_info = {
             "path": "patch_selection_generation",
+            "latency_seconds": latency_elapsed,
             "llm_generate_seconds": generate_elapsed,
             "generated_tokens": generated_tokens,
+            "input_sequence_length": int(prompt_length),
+            **flop_metrics,
         }
         return self._decode_generation_output(output_ids, prompt_length=prompt_length)
 

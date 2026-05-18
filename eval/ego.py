@@ -72,11 +72,19 @@ def _resolve_optional_int(value: Any) -> int | None:
     return resolved if resolved >= 0 else None
 
 
+def _resolve_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "y", "on"}
+    return bool(value)
+
+
 def _resolve_experiment_config_path(experiment_value: Any) -> Path:
     if experiment_value is None or not str(experiment_value).strip():
         raise ValueError(
             "`experiment` must be provided. "
-            "Example: `python -m eval.egoschema experiment=base` or `experiment=patch`."
+            "Example: `python -m eval.egoschema experiment=DDPS`."
         )
 
     raw_value = str(experiment_value).strip()
@@ -538,6 +546,23 @@ def main(config: DictConfig) -> None:
     if not prompt_file_value:
         raise ValueError("`invoke.prompt_file` must be provided in the config.")
 
+    profile_flops_value = eval_config.get("profile_flops")
+    if profile_flops_value is not None:
+        OmegaConf.update(
+            runtime_config,
+            "vlm.profile_flops",
+            _resolve_bool(profile_flops_value),
+            merge=False,
+        )
+    profile_flops_top_ops_value = eval_config.get("profile_flops_top_ops")
+    if profile_flops_top_ops_value is not None:
+        OmegaConf.update(
+            runtime_config,
+            "vlm.profile_flops_top_ops",
+            int(profile_flops_top_ops_value),
+            merge=False,
+        )
+
     prompt_file = Path(to_absolute_path(str(prompt_file_value))).resolve()
     prompt_template = _load_prompt_template(prompt_file)
     dataset_root, questions_file, uid_map_file, videos_dir = _resolve_dataset_layout(eval_config)
@@ -597,6 +622,7 @@ def main(config: DictConfig) -> None:
     print(f"Videos Dir   : {videos_dir}")
     print(f"Prompt File  : {prompt_file}")
     print(f"Output File  : {output_path}")
+    print(f"Profile FLOPs: {bool(runtime_config.vlm.get('profile_flops', False))}")
     print(f"Samples      : {len(samples)}")
     print(f"Pending      : {len(pending_samples)}")
     if skipped_existing > 0:

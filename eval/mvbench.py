@@ -86,7 +86,7 @@ def _resolve_experiment_config_path(experiment_value: Any) -> Path:
     if experiment_value is None or not str(experiment_value).strip():
         raise ValueError(
             "`experiment` must be provided. "
-            "Example: `python -m eval.mvbench experiment=base` or `experiment=trips`."
+            "Example: `python -m eval.mvbench experiment=DDPS`."
         )
 
     raw_value = str(experiment_value).strip()

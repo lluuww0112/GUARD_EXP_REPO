@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DDPS Performance Table</title>
+  <style>
+    :root {
+      --bg: #f2eee7;
+      --surface: rgba(255, 252, 246, 0.94);
+      --line: rgba(35, 23, 14, 0.12);
+      --text: #1b1713;
+      --muted: #645a50;
+      --accent: #ff7a00;
+      --navy: #10233c;
+      --highlight: rgba(255, 122, 0, 0.18);
+      --soft: rgba(16, 35, 60, 0.06);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      color: var(--text);
+      font-family: "Avenir Next", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+      background:
+        radial-gradient(circle at 10% 10%, rgba(255, 122, 0, 0.16), transparent 18%),
+        radial-gradient(circle at 88% 14%, rgba(16, 35, 60, 0.12), transparent 22%),
+        linear-gradient(180deg, #f8f5ef 0%, var(--bg) 100%);
+    }
+    .block {
+      max-width: 1280px;
+      min-height: min(56.25vw, 720px);
+      margin: 0 auto;
+      padding: 34px;
+      border: 1px solid var(--line);
+      border-radius: 32px;
+      background:
+        linear-gradient(180deg, rgba(255, 253, 248, 0.98), rgba(246, 240, 232, 0.92));
+      box-shadow: 0 24px 60px rgba(15, 24, 38, 0.14);
+    }
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+    .back-link {
+      display: inline-flex;
+      margin-bottom: 18px;
+      color: var(--navy);
+      font-size: 14px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    h2 {
+      margin: 0 0 10px;
+      font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+      color: var(--navy);
+      font-size: clamp(36px, 4.4vw, 56px);
+      line-height: 0.98;
+    }
+    .desc {
+      margin: 0 0 18px;
+      color: var(--muted);
+      max-width: 68ch;
+      line-height: 1.65;
+    }
+    .hero-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      margin-bottom: 18px;
+    }
+    .badge {
+      display: inline-flex;
+      padding: 9px 13px;
+      border-radius: 999px;
+      background: var(--highlight);
+      color: var(--accent);
+      font-size: 13px;
+      font-weight: 800;
+    }
+    .callout {
+      padding: 14px 16px;
+      border-left: 6px solid var(--accent);
+      border-radius: 16px;
+      background: linear-gradient(90deg, rgba(255, 122, 0, 0.10), rgba(16, 35, 60, 0.05));
+      color: var(--navy);
+      font-weight: 700;
+    }
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: var(--surface);
+    }
+    table {
+      width: 100%;
+      min-width: 860px;
+      border-collapse: collapse;
+    }
+    th, td {
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--line);
+      text-align: center;
+      white-space: nowrap;
+    }
+    th:first-child, td:first-child { text-align: left; }
+    thead th {
+      color: var(--navy);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      background: var(--soft);
+    }
+    tbody tr:last-child td { border-bottom: 0; }
+    .subtle { background: var(--soft); }
+    .focus {
+      background: linear-gradient(90deg, rgba(255, 122, 0, 0.20), rgba(16, 35, 60, 0.08));
+      font-weight: 700;
+    }
+    @media (max-width: 860px) {
+      .hero-bar {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+      .block {
+        min-height: auto;
+        padding: 22px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <section class="block">
+    <a class="back-link" href="./index.html">← Back to landing page</a>
+    <p class="eyebrow">Main Benchmark Result</p>
+    <h2>DDPS Performance Comparison</h2>
+    <p class="desc">
+      DDPS preserves a +0.26% average benchmark gap even when the keep ratio is reduced to 0.3,
+      while shrinking the retained token ratio to 7.5% of the original patch sequence.
+    </p>
+    <div class="hero-bar">
+      <div class="badge">Default recommendation: ρ = 0.3</div>
+      <div class="callout">Key takeaway: ρ = 0.3 is the strongest balance between compression and performance preservation.</div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Method</th>
+            <th>Params</th>
+            <th>Keep</th>
+            <th>Token Ratio</th>
+            <th>NeXT-QA</th>
+            <th>EgoSchema</th>
+            <th>VideoMME</th>
+            <th>Avg. Gap</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Baseline (Qwen3-VL)</td>
+            <td>8B</td>
+            <td>-</td>
+            <td>12.5%</td>
+            <td>78.02%</td>
+            <td>62.90%</td>
+            <td>57.78%</td>
+            <td>-</td>
+          </tr>
+          <tr>
+            <td>+ Frame Dup Only</td>
+            <td>8B</td>
+            <td>-</td>
+            <td>25.0%</td>
+            <td>80.02%</td>
+            <td>65.60%</td>
+            <td>59.94%</td>
+            <td>+2.29%</td>
+          </tr>
+          <tr class="subtle">
+            <td>+ DDPS (Ours)</td>
+            <td>8B</td>
+            <td>0.4</td>
+            <td>10.0%</td>
+            <td>78.08%</td>
+            <td>64.64%</td>
+            <td>57.66%</td>
+            <td>+0.56%</td>
+          </tr>
+          <tr class="focus">
+            <td>+ DDPS (Ours)</td>
+            <td>8B</td>
+            <td>0.3</td>
+            <td>7.5%</td>
+            <td>77.62%</td>
+            <td>64.38%</td>
+            <td>57.48%</td>
+            <td>+0.26%</td>
+          </tr>
+          <tr class="subtle">
+            <td>+ DDPS (Ours)</td>
+            <td>8B</td>
+            <td>0.2</td>
+            <td>5.0%</td>
+            <td>76.94%</td>
+            <td>63.72%</td>
+            <td>56.83%</td>
+            <td>-0.40%</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+</body>
+</html>

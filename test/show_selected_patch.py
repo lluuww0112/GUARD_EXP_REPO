@@ -24,7 +24,7 @@ CONFIG_DIR = REPO_ROOT / "config"
 HTML_SUFFIXES = {".html", ".htm"}
 DATASET_CHOICES = ("direct", "nextqa", "mvbench", "videomme", "egoschema")
 DEFAULT_DIRECT_VIDEO_PATH = REPO_ROOT / "data" / "12223108496.mp4"
-DEFAULT_DIRECT_QUERY_TEXT = "The color of the wall."
+DEFAULT_DIRECT_QUERY_TEXT = "Black dog."
 DEFAULT_PATCH_SELECTION_KEY = "patch_selection_v4"
 
 if str(REPO_ROOT) not in sys.path:

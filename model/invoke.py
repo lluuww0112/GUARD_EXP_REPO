@@ -218,6 +218,8 @@ def main(config: DictConfig) -> None:
     timing_info = getattr(vlm, "last_timing_info", {}) or {}
     llm_generate_seconds = timing_info.get("llm_generate_seconds")
     generated_tokens = timing_info.get("generated_tokens")
+    llm_generate_gflops = timing_info.get("llm_generate_gflops")
+    llm_profiled_ops = timing_info.get("llm_generate_profiled_flop_ops")
     if llm_generate_seconds is not None:
         llm_generate_seconds = float(llm_generate_seconds)
         print(f"LLM Generate: {llm_generate_seconds:.2f}s")
@@ -227,6 +229,10 @@ def main(config: DictConfig) -> None:
             print(f"Gen Tokens  : {generated_tokens}")
             if llm_generate_seconds > 0:
                 print(f"LLM Tok/s   : {generated_tokens / llm_generate_seconds:.2f}")
+        if llm_generate_gflops is not None:
+            print(f"LLM GFLOPs  : {float(llm_generate_gflops):.2f}")
+        if llm_profiled_ops is not None:
+            print(f"FLOP Ops    : {int(llm_profiled_ops)}")
         
 
 

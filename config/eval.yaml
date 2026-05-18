@@ -9,7 +9,7 @@ hydra:
   run:
     dir: .
 
-experiment: "base" # 사용할 모델 config 파일 이름
+experiment: "DDPS" # 사용할 모델 config 파일 이름
 
 egoschema:
   dataset_root: "../../EgoSchema" # 데이터 셋 루트 경로, question파일이랑 map파일 값이 null이면 자동으로 데이터 셋 루트에서 탐색함
@@ -22,6 +22,8 @@ egoschema:
   progress_interval: 10 # tqdm 업데이트 간격
   start_index: 0 # 시작 샘플 인덱스, 즉 limit이 300이면 0~299의 샘플을 사용
   limit: null # 테스트할 샘플 수, null로 설정되면 전체 평가
+  profile_flops: true # EgoSchema 평가 시 generate() FLOPs 측정
+  profile_flops_top_ops: 5 # 결과 JSONL에 저장할 상위 FLOPs op 개수
 
 nextqa:
   dataset_root: "/content/drive/MyDrive/NExTVideo/nextqa" # Colab + Google Drive default root
@@ -33,6 +35,8 @@ nextqa:
   progress_interval: 10 # tqdm update interval
   start_index: 0 # first sample index
   limit: null # sample limit, set null for full evaluation
+  profile_flops: true # NextQA 평가 시 generate() FLOPs 측정
+  profile_flops_top_ops: 5 # 결과 JSONL에 저장할 상위 FLOPs op 개수
 
 videomme:
   dataset_root: "/content/drive/MyDrive/Video-MME" # Colab + Google Drive default root

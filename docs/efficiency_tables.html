@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DDPS Efficiency Tables</title>
+  <style>
+    :root {
+      --bg: #f2eee7;
+      --surface: rgba(255, 252, 246, 0.94);
+      --line: rgba(35, 23, 14, 0.12);
+      --text: #1b1713;
+      --muted: #645a50;
+      --accent: #ff7a00;
+      --navy: #10233c;
+      --focus: rgba(255, 122, 0, 0.18);
+      --soft: rgba(16, 35, 60, 0.06);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 24px;
+      color: var(--text);
+      font-family: "Avenir Next", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+      background:
+        radial-gradient(circle at 90% 10%, rgba(16, 35, 60, 0.14), transparent 22%),
+        radial-gradient(circle at 10% 12%, rgba(255, 122, 0, 0.16), transparent 18%),
+        linear-gradient(180deg, #f8f5ef 0%, var(--bg) 100%);
+    }
+    .shell {
+      max-width: 1320px;
+      margin: 0 auto;
+      display: grid;
+      gap: 18px;
+    }
+    .panel {
+      padding: 32px;
+      border: 1px solid var(--line);
+      border-radius: 32px;
+      background: var(--surface);
+      box-shadow: 0 24px 60px rgba(15, 24, 38, 0.14);
+    }
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+    .back-link {
+      display: inline-flex;
+      margin-bottom: 18px;
+      color: var(--navy);
+      font-size: 14px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    h2, h3, p { margin: 0; }
+    h2, h3 {
+      font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    }
+    h2 {
+      color: var(--navy);
+      font-size: clamp(36px, 4vw, 54px);
+      line-height: 0.98;
+    }
+    h3 {
+      margin-bottom: 10px;
+      font-size: 18px;
+    }
+    .desc {
+      margin-top: 10px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 1.2fr 0.95fr;
+      gap: 18px;
+    }
+    .table-card + .table-card {
+      margin-top: 16px;
+    }
+    .table-card {
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255, 250, 242, 0.98);
+    }
+    .table-wrap {
+      overflow-x: auto;
+    }
+    table {
+      width: 100%;
+      min-width: 520px;
+      border-collapse: collapse;
+    }
+    th, td {
+      padding: 13px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: center;
+      white-space: nowrap;
+    }
+    th:first-child, td:first-child { text-align: left; }
+    thead th {
+      color: var(--navy);
+      font-size: 13px;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      background: var(--soft);
+    }
+    tbody tr:last-child td { border-bottom: 0; }
+    .focus-row {
+      background: linear-gradient(90deg, rgba(255, 122, 0, 0.20), rgba(16, 35, 60, 0.08));
+      font-weight: 700;
+    }
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+    .summary-box {
+      padding: 16px 18px;
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(16, 35, 60, 0.96), rgba(25, 50, 82, 0.96));
+      color: #fff7ef;
+    }
+    .summary-box span {
+      display: block;
+      margin-bottom: 8px;
+      color: rgba(255, 247, 239, 0.72);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .summary-box strong {
+      font-size: 24px;
+      line-height: 1.1;
+    }
+    .notes {
+      display: grid;
+      gap: 12px;
+      margin-top: 16px;
+    }
+    .note {
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: linear-gradient(180deg, rgba(255, 250, 242, 0.95), rgba(247, 238, 225, 0.76));
+    }
+    .note span {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .note strong {
+      font-size: 18px;
+      line-height: 1.45;
+    }
+    @media (max-width: 980px) {
+      .grid { grid-template-columns: 1fr; }
+      .summary-strip { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="panel">
+      <a class="back-link" href="./index.html">← Back to landing page</a>
+      <p class="eyebrow">Efficiency Summary</p>
+      <h2>Token Usage and Compute Cost</h2>
+      <p class="desc">
+        As the keep ratio decreases, DDPS reduces both the visual token count and the compute cost.
+        For presentation and deployment, ρ = 0.3 is the clearest default operating point.
+      </p>
+      <div class="summary-strip">
+        <div class="summary-box">
+          <span>Recommended</span>
+          <strong>ρ = 0.3</strong>
+        </div>
+        <div class="summary-box">
+          <span>Avg Tokens</span>
+          <strong>2302.68 → 690.24</strong>
+        </div>
+        <div class="summary-box">
+          <span>Prefill</span>
+          <strong>188.9 ms → 67.0 ms</strong>
+        </div>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="panel">
+        <div class="table-card">
+          <h3>Average Total Visual Tokens</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Keep</th>
+                  <th>NeXT-QA</th>
+                  <th>EgoSchema</th>
+                  <th>VideoMME</th>
+                  <th>Avg.</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>1.0 (Original)</td>
+                  <td>2452.08</td>
+                  <td>1769.17</td>
+                  <td>2686.79</td>
+                  <td>2302.68</td>
+                </tr>
+                <tr>
+                  <td>0.4</td>
+                  <td>980.44</td>
+                  <td>706.09</td>
+                  <td>1074.43</td>
+                  <td>920.32</td>
+                </tr>
+                <tr class="focus-row">
+                  <td>0.3</td>
+                  <td>735.33</td>
+                  <td>529.57</td>
+                  <td>805.82</td>
+                  <td>690.24</td>
+                </tr>
+                <tr>
+                  <td>0.2</td>
+                  <td>490.22</td>
+                  <td>353.05</td>
+                  <td>537.21</td>
+                  <td>460.16</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="table-card">
+          <h3>Average Visual Tokens Per Frame</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Keep</th>
+                  <th>NeXT-QA</th>
+                  <th>EgoSchema</th>
+                  <th>VideoMME</th>
+                  <th>Avg.</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>1.0 (Original)</td>
+                  <td>245.21</td>
+                  <td>176.92</td>
+                  <td>268.68</td>
+                  <td>230.27</td>
+                </tr>
+                <tr>
+                  <td>0.4</td>
+                  <td>98.04</td>
+                  <td>70.61</td>
+                  <td>107.44</td>
+                  <td>92.03</td>
+                </tr>
+                <tr class="focus-row">
+                  <td>0.3</td>
+                  <td>73.53</td>
+                  <td>52.96</td>
+                  <td>80.58</td>
+                  <td>69.02</td>
+                </tr>
+                <tr>
+                  <td>0.2</td>
+                  <td>49.02</td>
+                  <td>35.31</td>
+                  <td>53.72</td>
+                  <td>46.02</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel">
+        <div class="table-card">
+          <h3>Prefill Time and Computational Cost</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Setting</th>
+                  <th>Keep</th>
+                  <th>Prefill (ms)</th>
+                  <th>TFLOPs</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Baseline (w/o dup.)</td>
+                  <td>-</td>
+                  <td>188.9</td>
+                  <td>25.60</td>
+                </tr>
+                <tr>
+                  <td>+ Frame Dup Only</td>
+                  <td>-</td>
+                  <td>398.6</td>
+                  <td>51.88</td>
+                </tr>
+                <tr>
+                  <td>+ DDPS (Ours)</td>
+                  <td>0.4</td>
+                  <td>89.0</td>
+                  <td>17.24</td>
+                </tr>
+                <tr class="focus-row">
+                  <td>+ DDPS (Ours)</td>
+                  <td>0.3</td>
+                  <td>67.0</td>
+                  <td>13.48</td>
+                </tr>
+                <tr>
+                  <td>+ DDPS (Ours)</td>
+                  <td>0.2</td>
+                  <td>57.0</td>
+                  <td>9.77</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="notes">
+          <div class="note">
+            <span>Cost spike</span>
+            <strong>Frame duplication alone increases cost sharply, reaching 398.6 ms prefill and 51.88 TFLOPs.</strong>
+          </div>
+          <div class="note">
+            <span>Balanced point</span>
+            <strong>DDPS at ρ = 0.3 is the most persuasive balance point, with 690.24 average tokens and 67.0 ms prefill.</strong>
+          </div>
+          <div class="note">
+            <span>Strong compression</span>
+            <strong>DDPS at ρ = 0.2 drops to 460.16 tokens and 9.77 TFLOPs, making it the aggressive compression option.</strong>
+          </div>
+        </div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

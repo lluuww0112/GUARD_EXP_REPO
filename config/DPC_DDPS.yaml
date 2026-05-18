@@ -142,6 +142,8 @@ vlm:
   processor_kwargs: {}
   model_kwargs: {}
   local_model_dir: "./model/repo"
+  profile_flops: false
+  profile_flops_top_ops: 5
   generation_kwargs:
     do_sample: false
     max_new_tokens: 128
