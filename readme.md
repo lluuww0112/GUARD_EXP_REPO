@@ -9,7 +9,7 @@
 
 
 <p align="center">
-  <img src="./docs/asset/guard.png" alt="GUARD project logo" width="420" />
+  <img src="./docs/assets/guard.png" alt="GUARD project logo" width="420" />
 </p>
 
 
